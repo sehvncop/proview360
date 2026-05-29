@@ -16,7 +16,7 @@ export default function Scan() {
   const router = useRouter()
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
-  const [screen, setScreen] = useState('start') // start | capture | form | uploading | done
+  const [screen, setScreen] = useState('start')
   const [currentShot, setCurrentShot] = useState(0)
   const [photos, setPhotos] = useState([])
   const [gyroEnabled, setGyroEnabled] = useState(false)
@@ -61,27 +61,48 @@ export default function Scan() {
   }
 
   async function startCapture() {
+    // Check support
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      alert('Camera not supported. Use Safari on iPhone or Chrome on Android.')
+      return
+    }
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
-        audio: false
-      })
+      let stream
+      try {
+        // Try high-res first
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
+          audio: false
+        })
+      } catch {
+        // Safari fallback — simpler constraints
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: false
+        })
+      }
       videoRef.current.srcObject = stream
       await videoRef.current.play()
       canvasRef.current.width = videoRef.current.videoWidth || 1920
       canvasRef.current.height = videoRef.current.videoHeight || 1080
     } catch (e) {
-      alert('Camera access denied. Please allow camera.')
+      alert('Camera blocked.\n\niPhone fix:\nSettings → Safari → Camera → Allow\n\nThen reload this page.')
       return
     }
 
-    // Request gyro
+    // Request gyro (iOS 13+ needs explicit permission)
     if (typeof DeviceOrientationEvent !== 'undefined') {
       if (typeof DeviceOrientationEvent.requestPermission === 'function') {
         try {
           const p = await DeviceOrientationEvent.requestPermission()
-          if (p === 'granted') { window.addEventListener('deviceorientation', onOrientation); setGyroEnabled(true) }
-        } catch(e) {}
+          if (p === 'granted') {
+            window.addEventListener('deviceorientation', onOrientation)
+            setGyroEnabled(true)
+          }
+        } catch(e) {
+          // Gyro denied — manual mode
+        }
       } else {
         window.addEventListener('deviceorientation', onOrientation)
         setGyroEnabled(true)
@@ -213,11 +234,18 @@ export default function Scan() {
         <h1 style={s.h1}>Scan Your Property</h1>
         <p style={s.sub}>Stand in center of room. Follow the dot around the space. We'll guide you through {TOTAL} positions.</p>
         <div style={s.steps}>
-          {[['1','Stand in center of room'],['2','Point camera at white dot'],['3','Dot turns green → auto captures'],['4','Repeat for all positions (~2 min)']].map(([n,t]) => (
+          {[
+            ['1','Stand in center of room'],
+            ['2','Point camera at white dot'],
+            ['3','Dot turns green → auto captures'],
+            ['4','Repeat for all positions (~2 min)']
+          ].map(([n,t]) => (
             <div key={n} style={s.step}><div style={s.stepNum}>{n}</div>{t}</div>
           ))}
         </div>
-        <button style={s.primaryBtn} onClick={startCapture}>Start Scanning</button>
+        <button style={s.primaryBtn} onClick={async () => { await startCapture() }}>
+          Start Scanning
+        </button>
       </div>
     </div>
   )
@@ -228,28 +256,22 @@ export default function Scan() {
       <video ref={videoRef} autoPlay playsInline muted style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}}/>
       <canvas ref={canvasRef} style={{display:'none'}}/>
 
-      {/* Flash */}
       {flash && <div style={{position:'absolute',inset:0,background:'#fff',zIndex:50,pointerEvents:'none'}}/>}
 
-      {/* Target ring */}
       <div style={{...s.targetRing, left:targetPos.x, top:targetPos.y}}>
         <div style={s.targetDot}/>
       </div>
 
-      {/* Aim dot (center) */}
       <div style={{...s.aimDot, background: locked ? 'rgba(50,220,100,0.95)' : 'rgba(255,80,80,0.9)', boxShadow: locked ? '0 0 0 8px rgba(50,220,100,0.25)' : 'none'}}/>
 
-      {/* Status */}
       <div style={s.captureStatus}>{locked ? '✅ Hold still…' : statusMsg}</div>
 
-      {/* Progress dots */}
       <div style={s.progressWrap}>
         {SHOT_POSITIONS.map((_, i) => (
           <div key={i} style={{...s.pdot, background: i < currentShot ? '#32dc64' : i === currentShot ? '#fff' : 'rgba(255,255,255,0.25)'}}/>
         ))}
       </div>
 
-      {/* Bottom bar */}
       <div style={s.bottomBar}>
         <div style={{fontSize:13,color:'rgba(255,255,255,0.7)',minWidth:60}}>{currentShot}/{TOTAL}</div>
         <button style={{...s.captureBtn, borderColor: locked ? '#32dc64' : '#fff'}} onClick={doCapture}>
@@ -345,7 +367,6 @@ const s = {
   step: { display:'flex', alignItems:'center', gap:12, background:'rgba(255,255,255,0.05)', borderRadius:10, padding:'12px 14px', fontSize:14, color:'#ccc', textAlign:'left' },
   stepNum: { width:28, height:28, borderRadius:'50%', background:'rgba(100,150,255,0.2)', border:'1px solid rgba(100,150,255,0.4)', color:'#6496ff', fontWeight:700, fontSize:13, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 },
   primaryBtn: { width:'100%', maxWidth:320, padding:16, borderRadius:12, border:'none', background:'#6496ff', color:'#fff', fontSize:16, fontWeight:600, cursor:'pointer' },
-  // capture
   targetRing: { position:'absolute', width:80, height:80, borderRadius:'50%', border:'3px solid rgba(255,255,255,0.9)', transform:'translate(-50%,-50%)', zIndex:20, pointerEvents:'none', transition:'left 0.7s cubic-bezier(0.34,1.56,0.64,1), top 0.7s cubic-bezier(0.34,1.56,0.64,1)' },
   targetDot: { position:'absolute', width:12, height:12, background:'white', borderRadius:'50%', top:'50%', left:'50%', transform:'translate(-50%,-50%)' },
   aimDot: { position:'absolute', width:16, height:16, borderRadius:'50%', border:'2px solid white', top:'50%', left:'50%', transform:'translate(-50%,-50%)', zIndex:20, pointerEvents:'none', transition:'background 0.2s, box-shadow 0.2s' },
@@ -357,7 +378,6 @@ const s = {
   captureBtnInner: { width:50, height:50, borderRadius:'50%', transition:'background 0.2s' },
   skipBtn: { fontSize:13, color:'rgba(255,255,255,0.6)', background:'none', border:'1px solid rgba(255,255,255,0.2)', padding:'8px 16px', borderRadius:20, cursor:'pointer', minWidth:60, WebkitTapHighlightColor:'transparent' },
   gyroNotice: { position:'absolute', top:100, left:'50%', transform:'translateX(-50%)', background:'rgba(255,180,0,0.15)', border:'1px solid rgba(255,180,0,0.4)', color:'#ffb400', fontSize:12, padding:'6px 14px', borderRadius:20, zIndex:30, whiteSpace:'nowrap' },
-  // form
   formWrap: { padding:'32px 24px', maxWidth:480, margin:'0 auto', display:'flex', flexDirection:'column', gap:4 },
   thumbStrip: { display:'flex', gap:6, overflowX:'auto', padding:'8px 0', marginBottom:16 },
   thumb: { width:64, height:64, objectFit:'cover', borderRadius:8, flexShrink:0 },

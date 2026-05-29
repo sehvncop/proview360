@@ -68,48 +68,43 @@ export default function Scan() {
 
     let stream = null
 
-    // iOS Safari quirk: must use bare `video: true` first
-    // then re-apply constraints AFTER stream is granted
+    // iOS Safari: ONE getUserMedia call, no stop/restart
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false
+      })
     } catch(e1) {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
       } catch(e2) {
         const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
         if (isIOS) {
-          alert('Camera blocked.\n\nDo this:\n1. Close Safari fully\n2. Settings → Safari → Camera → Allow\n3. Reopen this page\n4. Tap "Start Using Camera" when Safari asks')
+          alert('Camera blocked.\n\nFix:\n1. Close Safari fully\n2. Settings → Privacy → Camera → Safari → ON\n3. Reopen page and try again')
         } else {
-          alert('Camera blocked. Click the lock 🔒 in address bar → Camera → Allow → refresh.')
+          alert('Camera blocked.\nClick lock in address bar → Camera → Allow → refresh.')
         }
         return
       }
     }
 
-    // Stop bare stream, restart with back camera + high res
-    stream.getTracks().forEach(t => t.stop())
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { exact: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: false
-      })
-    } catch {
-      // Fallback if exact environment fails (some devices)
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+    const video = videoRef.current
+    if (!video) return
+    video.srcObject = stream
+    video.playsInline = true
+    video.muted = true
+    video.autoplay = true
+
+    try { await video.play() } catch(e) {
+      await new Promise(r => setTimeout(r, 300))
+      try { await video.play() } catch(e2) { console.warn('play failed', e2) }
     }
 
-    const video = videoRef.current
-    video.srcObject = stream
-    video.setAttribute('autoplay', '')
-    video.setAttribute('playsinline', '')
-    video.setAttribute('muted', '')
-    try { await video.play() } catch(e) { video.play() }
-
-    // Wait for video dimensions
+    // Wait for actual video frame with polling
     await new Promise(resolve => {
-      if (video.videoWidth) return resolve()
-      video.onloadedmetadata = resolve
-      setTimeout(resolve, 2000)
+      const check = () => { if (video.videoWidth > 0) return resolve(); setTimeout(check, 100) }
+      check()
+      setTimeout(resolve, 3000)
     })
 
     canvasRef.current.width = video.videoWidth || 1280

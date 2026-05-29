@@ -1,4 +1,4 @@
-# PropView360 — Deploy Guide
+## PropView360 — Deploy Guide
 
 ## 1. Supabase Setup (do this first)
 

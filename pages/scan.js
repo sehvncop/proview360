@@ -61,35 +61,59 @@ export default function Scan() {
   }
 
   async function startCapture() {
-    // Check support
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert('Camera not supported. Use Safari on iPhone or Chrome on Android.')
+      alert('Camera not supported. Open in Safari on iPhone.')
       return
     }
 
+    let stream = null
+
+    // iOS Safari quirk: must use bare `video: true` first
+    // then re-apply constraints AFTER stream is granted
     try {
-      let stream
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+    } catch(e1) {
       try {
-        // Try high-res first
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
-          audio: false
-        })
-      } catch {
-        // Safari fallback — simpler constraints
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
-          audio: false
-        })
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+      } catch(e2) {
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+        if (isIOS) {
+          alert('Camera blocked.\n\nDo this:\n1. Close Safari fully\n2. Settings → Safari → Camera → Allow\n3. Reopen this page\n4. Tap "Start Using Camera" when Safari asks')
+        } else {
+          alert('Camera blocked. Click the lock 🔒 in address bar → Camera → Allow → refresh.')
+        }
+        return
       }
-      videoRef.current.srcObject = stream
-      await videoRef.current.play()
-      canvasRef.current.width = videoRef.current.videoWidth || 1920
-      canvasRef.current.height = videoRef.current.videoHeight || 1080
-    } catch (e) {
-      alert('Camera blocked.\n\niPhone fix:\nSettings → Safari → Camera → Allow\n\nThen reload this page.')
-      return
     }
+
+    // Stop bare stream, restart with back camera + high res
+    stream.getTracks().forEach(t => t.stop())
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { exact: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false
+      })
+    } catch {
+      // Fallback if exact environment fails (some devices)
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+    }
+
+    const video = videoRef.current
+    video.srcObject = stream
+    video.setAttribute('autoplay', '')
+    video.setAttribute('playsinline', '')
+    video.setAttribute('muted', '')
+    try { await video.play() } catch(e) { video.play() }
+
+    // Wait for video dimensions
+    await new Promise(resolve => {
+      if (video.videoWidth) return resolve()
+      video.onloadedmetadata = resolve
+      setTimeout(resolve, 2000)
+    })
+
+    canvasRef.current.width = video.videoWidth || 1280
+    canvasRef.current.height = video.videoHeight || 720
 
     // Request gyro (iOS 13+ needs explicit permission)
     if (typeof DeviceOrientationEvent !== 'undefined') {

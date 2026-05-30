@@ -44,7 +44,7 @@ export default async function handler(req, res) {
         if (metaField) shotMeta = JSON.parse(metaField.data.toString('utf8'))
 
         // Upload to Supabase Storage
-        const fileName = `${Date.now()}_${idx}.jpg`
+        const fileName = `shot_${Date.now()}_${String(idx).padStart(3,'0')}.jpg`
         const { data: uploadData, error: uploadError } = await supabase.storage
           .from('panoramas')
           .upload(fileName, data, {

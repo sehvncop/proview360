@@ -31,6 +31,7 @@ export default function Scan() {
   // White ring position on screen (moves as phone moves)
   // Red dot is always fixed at 50%, 50%
   const [ringPos, setRingPos] = useState({x:180, y:300})
+  const [debugInfo, setDebugInfo] = useState({alpha:0, beta:0, gamma:0, dyaw:0, dpitch:0})
 
   const [form, setForm] = useState({
     title:'', address:'', price:'', bedrooms:'',
@@ -140,6 +141,7 @@ export default function Scan() {
 
     currentYawRef.current   = dyaw
     currentPitchRef.current = dpitch
+    setDebugInfo({ alpha: Math.round(yaw), beta: Math.round(pitch), gamma: Math.round(e.gamma||0), dyaw: Math.round(dyaw*10)/10, dpitch: Math.round(dpitch*10)/10 })
 
     // Move ring: starts at shot position, moves toward center as phone rotates toward target
     const [tYaw, tPitch] = SHOT_POSITIONS[currentShotRef.current]
@@ -423,6 +425,17 @@ export default function Scan() {
           No gyro — aim ring at red dot then tap capture
         </div>
       )}
+
+      {/* DEBUG OVERLAY — remove after fixing */}
+      <div style={{position:'absolute',top:110,left:8,background:'rgba(0,0,0,0.75)',color:'#0f0',fontSize:11,padding:'8px 10px',borderRadius:8,zIndex:40,fontFamily:'monospace',lineHeight:1.8}}>
+        <div>α(yaw): {debugInfo.alpha}°</div>
+        <div>β(pitch): {debugInfo.beta}°</div>
+        <div>γ(gamma): {debugInfo.gamma}°</div>
+        <div>Δyaw: {debugInfo.dyaw}°</div>
+        <div>Δpitch: {debugInfo.dpitch}°</div>
+        <div>ring: {Math.round(ringPos.x)},{Math.round(ringPos.y)}</div>
+        <div>locked: {locked?'YES':'no'}</div>
+      </div>
     </div>
   )
 

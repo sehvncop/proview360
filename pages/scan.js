@@ -122,62 +122,72 @@ export default function Scan() {
   }
 
   const onOrientation = useCallback((e) => {
-    // Skip if no real data
     if (e.alpha === null || e.alpha === undefined) return
-    if (e.beta === null || e.beta === undefined) return
-    // Skip zero events (uncalibrated)
+    if (e.beta  === null || e.beta  === undefined) return
     if (e.alpha === 0 && e.beta === 0 && e.gamma === 0) return
 
-    const yaw   = e.alpha   // 0-360 compass
-    const pitch = e.beta    // -180 to 180 (forward tilt)
+    const yaw   = e.alpha              // 0-360 compass heading
+    // iPhone held upright = beta ~90°. Normalize to 0° = upright
+    const pitch = e.beta - 90          // now 0° = phone upright, + = tilt back, - = tilt forward
+    const gamma = e.gamma || 0         // left-right tilt (-90 to 90)
 
-    // Calibrate base on first reading per shot
+    // Calibrate on first reading per shot
     if (baseYawRef.current === null) {
       baseYawRef.current   = yaw
       basePitchRef.current = pitch
       return
     }
 
-    // Delta from base (how much phone moved since shot started)
+    // How much has phone rotated since shot started
     let dyaw = yaw - baseYawRef.current
-    // Wrap yaw delta
-    if (dyaw > 180) dyaw -= 360
+    if (dyaw >  180) dyaw -= 360
     if (dyaw < -180) dyaw += 360
     const dpitch = pitch - basePitchRef.current
 
-    currentYawRef.current   = dyaw
-    currentPitchRef.current = dpitch
-    setDebugInfo({ alpha: Math.round(yaw), beta: Math.round(pitch), gamma: Math.round(e.gamma||0), dyaw: Math.round(dyaw*10)/10, dpitch: Math.round(dpitch*10)/10 })
+    // Smooth values to reduce jitter (lerp with previous)
+    currentYawRef.current   = currentYawRef.current   * 0.6 + dyaw   * 0.4
+    currentPitchRef.current = currentPitchRef.current * 0.6 + dpitch * 0.4
 
-    // Move ring: starts at shot position, moves toward center as phone rotates toward target
+    const smoothYaw   = currentYawRef.current
+    const smoothPitch = currentPitchRef.current
+
+    setDebugInfo({
+      alpha:  Math.round(yaw),
+      beta:   Math.round(pitch),
+      gamma:  Math.round(gamma),
+      dyaw:   Math.round(smoothYaw  * 10) / 10,
+      dpitch: Math.round(smoothPitch * 10) / 10
+    })
+
     const [tYaw, tPitch] = SHOT_POSITIONS[currentShotRef.current]
+    // Normalize target yaw to -180..180
     let tYawNorm = tYaw > 180 ? tYaw - 360 : tYaw
-    const scale = 8
+
     const W = window.innerWidth
     const H = window.innerHeight
+    // Scale: how many px per degree — smaller = more forgiving
+    const scale = 5
 
-    // Ring pos = target offset minus how much we've rotated toward it
-    const ringX = W/2 + (tYawNorm - dyaw) * scale
-    const ringY = H/2 - (tPitch  - dpitch) * scale
+    // Ring starts at target offset, shrinks toward center as phone rotates toward target
+    const ringX = W/2 + (tYawNorm - smoothYaw)   * scale
+    const ringY = H/2 - (tPitch   - smoothPitch) * scale
 
-    const clampedX = Math.max(40, Math.min(W-40, ringX))
-    const clampedY = Math.max(80, Math.min(H-160, ringY))
+    const clampedX = Math.max(50, Math.min(W - 50, ringX))
+    const clampedY = Math.max(90, Math.min(H - 170, ringY))
     setRingPos({ x: clampedX, y: clampedY })
 
-    // Check distance of ring from center (red dot)
-    const dist = Math.sqrt(
-      Math.pow(clampedX - W/2, 2) +
-      Math.pow(clampedY - H/2, 2)
-    )
-    const pixelThreshold = LOCK_THRESHOLD * scale
+    // Lock when ring is close to center red dot (40px radius = generous)
+    const dist = Math.sqrt(Math.pow(clampedX - W/2, 2) + Math.pow(clampedY - H/2, 2))
+    const LOCK_PX = 40
 
-    if (dist < pixelThreshold && !lockedRef.current && !capturingRef.current) {
+    if (dist < LOCK_PX && !lockedRef.current && !capturingRef.current) {
       lockedRef.current = true
       setLocked(true)
       lockTimerRef.current = setTimeout(() => {
         if (lockedRef.current) doCapture()
       }, LOCK_HOLD_MS)
-    } else if (dist >= pixelThreshold && lockedRef.current) {
+    } else if (dist >= LOCK_PX + 10 && lockedRef.current) {
+      // Hysteresis: need to move a bit further out to unlock
       lockedRef.current = false
       setLocked(false)
       clearTimeout(lockTimerRef.current)

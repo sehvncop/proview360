@@ -233,7 +233,7 @@ export default function Scan() {
       photosRef.current = [...photosRef.current, newPhoto]
       setPhotos([...photosRef.current])
       // Save completed line from this shot position
-      setCompletedLines(prev => [...prev, { from: {...targetPos}, shotIdx: idx }])
+      setCompletedLines(prev => [...prev, { capturedAt: {...aimPos}, shotIdx: idx }])
       const next = idx + 1
       currentShotRef.current = next
       setCurrentShot(next)
@@ -381,42 +381,51 @@ export default function Scan() {
         <button style={{fontSize:13,color:'rgba(255,255,255,0.6)',background:'none',border:'1px solid rgba(255,255,255,0.2)',padding:'8px 16px',borderRadius:20,cursor:'pointer',minWidth:60,WebkitTapHighlightColor:'transparent'}} onClick={skipShot}>Skip</button>
       </div>
 
-      {/* SVG trail — lines from completed shots */}
+      {/* SVG overlay — trail from red aim dot to white target ring */}
       <svg style={{position:'absolute',inset:0,width:'100%',height:'100%',zIndex:15,pointerEvents:'none'}}>
+        {/* Completed shots — green dots at their captured positions */}
         {completedLines.map((line, i) => (
-          <line
-            key={i}
-            x1={line.from.x} y1={line.from.y}
-            x2={targetPos.x} y2={targetPos.y}
-            stroke="rgba(50,220,100,0.4)"
-            strokeWidth="2"
-            strokeDasharray="4 4"
-          />
+          <g key={i}>
+            <circle cx={line.capturedAt.x} cy={line.capturedAt.y} r={8} fill="#32dc64" opacity={0.9}/>
+            <circle cx={line.capturedAt.x} cy={line.capturedAt.y} r={14} fill="none" stroke="#32dc64" strokeWidth={1.5} opacity={0.4}/>
+          </g>
         ))}
-        {/* Live line from current aim to target dot */}
-        {gyroEnabled && (
-          <line
-            x1={aimPos.x} y1={aimPos.y}
-            x2={targetPos.x} y2={targetPos.y}
-            stroke={locked ? 'rgba(50,220,100,0.9)' : 'rgba(255,255,255,0.35)'}
-            strokeWidth={locked ? 3 : 1.5}
-            strokeDasharray={locked ? 'none' : '6 4'}
-          />
-        )}
-        {/* Completed shot dots */}
-        {completedLines.map((line, i) => (
-          <circle key={i} cx={line.from.x} cy={line.from.y} r={6} fill="#32dc64" opacity={0.8}/>
-        ))}
-        {/* Live aim crosshair (gyro only) */}
+
+        {/* LIVE trail: red aim dot → white target ring */}
         {gyroEnabled && (
           <g>
-            <circle cx={aimPos.x} cy={aimPos.y} r={10}
-              fill="none"
-              stroke={locked ? '#32dc64' : 'rgba(255,255,255,0.7)'}
-              strokeWidth={2}
+            {/* Dashed trail line — turns solid green when locked */}
+            <line
+              x1={aimPos.x} y1={aimPos.y}
+              x2={targetPos.x} y2={targetPos.y}
+              stroke={locked ? '#32dc64' : 'rgba(255,255,255,0.5)'}
+              strokeWidth={locked ? 3 : 1.5}
+              strokeDasharray={locked ? '0' : '8 5'}
+              strokeLinecap="round"
             />
-            <circle cx={aimPos.x} cy={aimPos.y} r={3}
-              fill={locked ? '#32dc64' : 'white'}
+            {/* Distance dots along the trail */}
+            {[0.25, 0.5, 0.75].map((t, i) => (
+              <circle
+                key={i}
+                cx={aimPos.x + (targetPos.x - aimPos.x) * t}
+                cy={aimPos.y + (targetPos.y - aimPos.y) * t}
+                r={3}
+                fill={locked ? '#32dc64' : 'rgba(255,255,255,0.4)'}
+              />
+            ))}
+          </g>
+        )}
+
+        {/* Red aim dot — where phone is currently pointing */}
+        {gyroEnabled && (
+          <g>
+            <circle cx={aimPos.x} cy={aimPos.y} r={12}
+              fill="none"
+              stroke={locked ? '#32dc64' : 'rgba(255,80,80,0.8)'}
+              strokeWidth={2.5}
+            />
+            <circle cx={aimPos.x} cy={aimPos.y} r={5}
+              fill={locked ? '#32dc64' : '#ff5050'}
             />
           </g>
         )}

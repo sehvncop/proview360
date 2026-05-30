@@ -32,6 +32,7 @@ export default function Scan() {
   // Red dot is always fixed at 50%, 50%
   const [ringPos, setRingPos] = useState({x:180, y:300})
   const [debugInfo, setDebugInfo] = useState({alpha:0, beta:0, gamma:0, dyaw:0, dpitch:0})
+  const [gyroAsked, setGyroAsked] = useState(false)
 
   const [form, setForm] = useState({
     title:'', address:'', price:'', bedrooms:'',
@@ -241,6 +242,25 @@ export default function Scan() {
     updateForShot(0)
   }
 
+  // Called directly from button tap — iOS requires this
+  async function enableGyroIOS() {
+    if (typeof DeviceOrientationEvent === 'undefined') return
+    if (typeof DeviceOrientationEvent.requestPermission !== 'function') return
+    try {
+      const p = await DeviceOrientationEvent.requestPermission()
+      if (p === 'granted') {
+        window.addEventListener('deviceorientation', onOrientation, true)
+        window.addEventListener('deviceorientationabsolute', onOrientation, true)
+        setGyroEnabled(true)
+        setGyroAsked(true)
+      } else {
+        setGyroAsked(true) // asked but denied — manual mode
+      }
+    } catch(e) {
+      setGyroAsked(true)
+    }
+  }
+
   function doCapture() {
     const idx = currentShotRef.current
     if (capturingRef.current || idx >= TOTAL) return
@@ -427,9 +447,23 @@ export default function Scan() {
         <button style={{fontSize:13,color:'rgba(255,255,255,0.6)',background:'none',border:'1px solid rgba(255,255,255,0.2)',padding:'8px 16px',borderRadius:20,cursor:'pointer',minWidth:60,WebkitTapHighlightColor:'transparent'}} onClick={skipShot}>Skip</button>
       </div>
 
-      {!gyroEnabled && (
+      {/* iOS gyro permission button - must be tapped directly */}
+      {!gyroEnabled && !gyroAsked && typeof window !== 'undefined' &&
+       typeof DeviceOrientationEvent !== 'undefined' &&
+       typeof DeviceOrientationEvent.requestPermission === 'function' && (
+        <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%)',zIndex:40,textAlign:'center'}}>
+          <button
+            onClick={enableGyroIOS}
+            style={{background:'#6496ff',color:'white',border:'none',padding:'16px 28px',borderRadius:14,fontSize:16,fontWeight:700,cursor:'pointer',display:'block',marginBottom:10}}
+          >
+            📡 Enable Motion Tracking
+          </button>
+          <div style={{color:'rgba(255,255,255,0.7)',fontSize:12}}>Required for auto-aim</div>
+        </div>
+      )}
+      {!gyroEnabled && gyroAsked && (
         <div style={{position:'absolute',top:100,left:'50%',transform:'translateX(-50%)',background:'rgba(255,180,0,0.15)',border:'1px solid rgba(255,180,0,0.4)',color:'#ffb400',fontSize:12,padding:'6px 14px',borderRadius:20,zIndex:30,whiteSpace:'nowrap'}}>
-          No gyro — aim ring at red dot then tap capture
+          Manual mode — aim ring at red dot then tap capture
         </div>
       )}
 

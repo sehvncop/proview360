@@ -38,6 +38,8 @@ export default function Scan() {
   const phoneYawRef = useRef(0)
   const phonePitchRef = useRef(0)
   const streamRef = useRef(null)
+  const [aimPos, setAimPos] = useState({ x: 0, y: 0 }) // real-time phone aim position
+  const [completedLines, setCompletedLines] = useState([]) // lines from captured shots to target
 
   useEffect(() => {
     return () => {
@@ -145,14 +147,22 @@ export default function Scan() {
         try {
           const p = await DeviceOrientationEvent.requestPermission()
           if (p === 'granted') {
-            window.addEventListener('deviceorientation', onOrientation)
+            window.addEventListener('deviceorientation', onOrientation, true)
             setGyroEnabled(true)
           }
-        } catch(e) { /* gyro denied, manual mode */ }
+        } catch(e) {
+          // Try without permission API (some iOS versions)
+          window.addEventListener('deviceorientation', onOrientation, true)
+          setGyroEnabled(true)
+        }
       } else {
-        window.addEventListener('deviceorientation', onOrientation)
+        window.addEventListener('deviceorientation', onOrientation, true)
         setGyroEnabled(true)
       }
+    } else {
+      // DeviceMotionEvent fallback
+      window.addEventListener('deviceorientation', onOrientation, true)
+      setGyroEnabled(true)
     }
 
     updateTarget(0)
@@ -162,6 +172,17 @@ export default function Scan() {
     if (e.alpha === null) return
     phoneYawRef.current = e.alpha
     phonePitchRef.current = -e.beta
+    // Update real-time aim dot position on screen
+    const W = window.innerWidth
+    const H = window.innerHeight
+    const yaw = e.alpha
+    const pitch = -e.beta
+    const x = ((yaw / 360) * W * 1.6 + W * 0.2) % W
+    const y = H * 0.48 - (pitch / 90) * H * 0.32
+    setAimPos({
+      x: Math.max(20, Math.min(W-20, x)),
+      y: Math.max(60, Math.min(H-160, y))
+    })
     checkAlignment()
   }
 
@@ -211,6 +232,8 @@ export default function Scan() {
       const newPhoto = { blob, url, yaw: SHOT_POSITIONS[idx][0], pitch: SHOT_POSITIONS[idx][1], index: idx }
       photosRef.current = [...photosRef.current, newPhoto]
       setPhotos([...photosRef.current])
+      // Save completed line from this shot position
+      setCompletedLines(prev => [...prev, { from: {...targetPos}, shotIdx: idx }])
       const next = idx + 1
       currentShotRef.current = next
       setCurrentShot(next)
@@ -358,9 +381,50 @@ export default function Scan() {
         <button style={{fontSize:13,color:'rgba(255,255,255,0.6)',background:'none',border:'1px solid rgba(255,255,255,0.2)',padding:'8px 16px',borderRadius:20,cursor:'pointer',minWidth:60,WebkitTapHighlightColor:'transparent'}} onClick={skipShot}>Skip</button>
       </div>
 
+      {/* SVG trail — lines from completed shots */}
+      <svg style={{position:'absolute',inset:0,width:'100%',height:'100%',zIndex:15,pointerEvents:'none'}}>
+        {completedLines.map((line, i) => (
+          <line
+            key={i}
+            x1={line.from.x} y1={line.from.y}
+            x2={targetPos.x} y2={targetPos.y}
+            stroke="rgba(50,220,100,0.4)"
+            strokeWidth="2"
+            strokeDasharray="4 4"
+          />
+        ))}
+        {/* Live line from current aim to target dot */}
+        {gyroEnabled && (
+          <line
+            x1={aimPos.x} y1={aimPos.y}
+            x2={targetPos.x} y2={targetPos.y}
+            stroke={locked ? 'rgba(50,220,100,0.9)' : 'rgba(255,255,255,0.35)'}
+            strokeWidth={locked ? 3 : 1.5}
+            strokeDasharray={locked ? 'none' : '6 4'}
+          />
+        )}
+        {/* Completed shot dots */}
+        {completedLines.map((line, i) => (
+          <circle key={i} cx={line.from.x} cy={line.from.y} r={6} fill="#32dc64" opacity={0.8}/>
+        ))}
+        {/* Live aim crosshair (gyro only) */}
+        {gyroEnabled && (
+          <g>
+            <circle cx={aimPos.x} cy={aimPos.y} r={10}
+              fill="none"
+              stroke={locked ? '#32dc64' : 'rgba(255,255,255,0.7)'}
+              strokeWidth={2}
+            />
+            <circle cx={aimPos.x} cy={aimPos.y} r={3}
+              fill={locked ? '#32dc64' : 'white'}
+            />
+          </g>
+        )}
+      </svg>
+
       {!gyroEnabled && (
         <div style={{position:'absolute',top:100,left:'50%',transform:'translateX(-50%)',background:'rgba(255,180,0,0.15)',border:'1px solid rgba(255,180,0,0.4)',color:'#ffb400',fontSize:12,padding:'6px 14px',borderRadius:20,zIndex:30,whiteSpace:'nowrap'}}>
-          No gyro — tap button when aimed at dot
+          No gyro — aim at the white ring and tap capture
         </div>
       )}
     </div>

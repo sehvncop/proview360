@@ -56,6 +56,7 @@ export default function Scan() {
     return () => {
       stopCamera()
       window.removeEventListener('deviceorientation', onOrientation, true)
+      window.removeEventListener('deviceorientationabsolute', onOrientation, true)
     }
   }, [])
 
@@ -120,7 +121,11 @@ export default function Scan() {
   }
 
   const onOrientation = useCallback((e) => {
-    if (e.alpha === null || e.beta === null) return
+    // Skip if no real data
+    if (e.alpha === null || e.alpha === undefined) return
+    if (e.beta === null || e.beta === undefined) return
+    // Skip zero events (uncalibrated)
+    if (e.alpha === 0 && e.beta === 0 && e.gamma === 0) return
 
     const yaw   = e.alpha   // 0-360 compass
     const pitch = e.beta    // -180 to 180 (forward tilt)
@@ -227,7 +232,9 @@ export default function Scan() {
           window.addEventListener('deviceorientation', onOrientation, true); setGyroEnabled(true)
         }
       } else {
-        window.addEventListener('deviceorientation', onOrientation, true); setGyroEnabled(true)
+        window.addEventListener('deviceorientation', onOrientation, true)
+        window.addEventListener('deviceorientationabsolute', onOrientation, true)
+        setGyroEnabled(true)
       }
     }
 

@@ -38,7 +38,7 @@ export default function Scan() {
   const phoneYawRef = useRef(0)
   const phonePitchRef = useRef(0)
   const streamRef = useRef(null)
-  const [aimPos, setAimPos] = useState({ x: 0, y: 0 }) // real-time phone aim position
+  // red dot = always fixed at screen center, no state needed
   const [completedLines, setCompletedLines] = useState([]) // lines from captured shots to target
 
   useEffect(() => {
@@ -172,17 +172,6 @@ export default function Scan() {
     if (e.alpha === null) return
     phoneYawRef.current = e.alpha
     phonePitchRef.current = -e.beta
-    // Update real-time aim dot position on screen
-    const W = window.innerWidth
-    const H = window.innerHeight
-    const yaw = e.alpha
-    const pitch = -e.beta
-    const x = ((yaw / 360) * W * 1.6 + W * 0.2) % W
-    const y = H * 0.48 - (pitch / 90) * H * 0.32
-    setAimPos({
-      x: Math.max(20, Math.min(W-20, x)),
-      y: Math.max(60, Math.min(H-160, y))
-    })
     checkAlignment()
   }
 
@@ -233,7 +222,7 @@ export default function Scan() {
       photosRef.current = [...photosRef.current, newPhoto]
       setPhotos([...photosRef.current])
       // Save completed line from this shot position
-      setCompletedLines(prev => [...prev, { capturedAt: {...aimPos}, shotIdx: idx }])
+      setCompletedLines(prev => [...prev, { x: targetPos.x, y: targetPos.y, shotIdx: idx }])
       const next = idx + 1
       currentShotRef.current = next
       setCurrentShot(next)
@@ -347,13 +336,13 @@ export default function Scan() {
         <div style={{position:'absolute',width:12,height:12,background: locked ? '#32dc64' : 'white',borderRadius:'50%',top:'50%',left:'50%',transform:'translate(-50%,-50%)'}}/>
       </div>
 
-      {/* Aim dot — phone center */}
+      {/* Fixed center red dot — this is always where user is pointing */}
       <div style={{
-        position:'absolute', width:16, height:16, borderRadius:'50%',
+        position:'absolute', width:20, height:20, borderRadius:'50%',
         border:'2px solid white', top:'50%', left:'50%',
-        transform:'translate(-50%,-50%)', zIndex:20, pointerEvents:'none',
-        background: locked ? 'rgba(50,220,100,0.95)' : 'rgba(255,80,80,0.9)',
-        boxShadow: locked ? '0 0 0 8px rgba(50,220,100,0.25)' : 'none',
+        transform:'translate(-50%,-50%)', zIndex:25, pointerEvents:'none',
+        background: locked ? '#32dc64' : '#ff4040',
+        boxShadow: locked ? '0 0 0 10px rgba(50,220,100,0.25)' : '0 0 0 4px rgba(255,64,64,0.3)',
         transition:'background 0.2s, box-shadow 0.2s'
       }}/>
 
@@ -381,54 +370,34 @@ export default function Scan() {
         <button style={{fontSize:13,color:'rgba(255,255,255,0.6)',background:'none',border:'1px solid rgba(255,255,255,0.2)',padding:'8px 16px',borderRadius:20,cursor:'pointer',minWidth:60,WebkitTapHighlightColor:'transparent'}} onClick={skipShot}>Skip</button>
       </div>
 
-      {/* SVG overlay — trail from red aim dot to white target ring */}
+      {/* SVG overlay — trail from fixed center (red dot) to target ring */}
       <svg style={{position:'absolute',inset:0,width:'100%',height:'100%',zIndex:15,pointerEvents:'none'}}>
-        {/* Completed shots — green dots at their captured positions */}
+        {/* Completed shots — green dots at their TARGET positions */}
         {completedLines.map((line, i) => (
           <g key={i}>
-            <circle cx={line.capturedAt.x} cy={line.capturedAt.y} r={8} fill="#32dc64" opacity={0.9}/>
-            <circle cx={line.capturedAt.x} cy={line.capturedAt.y} r={14} fill="none" stroke="#32dc64" strokeWidth={1.5} opacity={0.4}/>
+            <circle cx={line.x} cy={line.y} r={8} fill="#32dc64" opacity={0.9}/>
+            <circle cx={line.x} cy={line.y} r={15} fill="none" stroke="#32dc64" strokeWidth={1.5} opacity={0.5}/>
           </g>
         ))}
 
-        {/* LIVE trail: red aim dot → white target ring */}
-        {gyroEnabled && (
-          <g>
-            {/* Dashed trail line — turns solid green when locked */}
-            <line
-              x1={aimPos.x} y1={aimPos.y}
-              x2={targetPos.x} y2={targetPos.y}
-              stroke={locked ? '#32dc64' : 'rgba(255,255,255,0.5)'}
-              strokeWidth={locked ? 3 : 1.5}
-              strokeDasharray={locked ? '0' : '8 5'}
-              strokeLinecap="round"
-            />
-            {/* Distance dots along the trail */}
-            {[0.25, 0.5, 0.75].map((t, i) => (
-              <circle
-                key={i}
-                cx={aimPos.x + (targetPos.x - aimPos.x) * t}
-                cy={aimPos.y + (targetPos.y - aimPos.y) * t}
-                r={3}
-                fill={locked ? '#32dc64' : 'rgba(255,255,255,0.4)'}
-              />
-            ))}
-          </g>
-        )}
-
-        {/* Red aim dot — where phone is currently pointing */}
-        {gyroEnabled && (
-          <g>
-            <circle cx={aimPos.x} cy={aimPos.y} r={12}
-              fill="none"
-              stroke={locked ? '#32dc64' : 'rgba(255,80,80,0.8)'}
-              strokeWidth={2.5}
-            />
-            <circle cx={aimPos.x} cy={aimPos.y} r={5}
-              fill={locked ? '#32dc64' : '#ff5050'}
-            />
-          </g>
-        )}
+        {/* LIVE trail: screen center (red dot) → white target ring */}
+        <line
+          x1="50%" y1="50%"
+          x2={targetPos.x} y2={targetPos.y}
+          stroke={locked ? '#32dc64' : 'rgba(255,255,255,0.5)'}
+          strokeWidth={locked ? 3 : 1.5}
+          strokeDasharray={locked ? '0' : '8 5'}
+          strokeLinecap="round"
+        />
+        {[0.3, 0.6].map((t, i) => (
+          <circle
+            key={i}
+            cx={`calc(50% + ${(targetPos.x - 200) * t}px)`}
+            cy={`calc(50% + ${(targetPos.y - 350) * t}px)`}
+            r={3}
+            fill={locked ? '#32dc64' : 'rgba(255,255,255,0.45)'}
+          />
+        ))}
       </svg>
 
       {!gyroEnabled && (

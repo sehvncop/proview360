@@ -233,42 +233,7 @@ export default function Scan() {
     canvasRef.current.width  = video.videoWidth  || 1280
     canvasRef.current.height = video.videoHeight || 720
 
-    // Request gyro
-    if (typeof DeviceOrientationEvent !== 'undefined') {
-      if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-        try {
-          const p = await DeviceOrientationEvent.requestPermission()
-          if (p === 'granted') { window.addEventListener('deviceorientation', onOrientation, true); setGyroEnabled(true) }
-        } catch(e) {
-          window.addEventListener('deviceorientation', onOrientation, true); setGyroEnabled(true)
-        }
-      } else {
-        window.addEventListener('deviceorientation', onOrientation, true)
-        window.addEventListener('deviceorientationabsolute', onOrientation, true)
-        setGyroEnabled(true)
-      }
-    }
-
     updateForShot(0)
-  }
-
-  // Called directly from button tap — iOS requires this
-  async function enableGyroIOS() {
-    if (typeof DeviceOrientationEvent === 'undefined') return
-    if (typeof DeviceOrientationEvent.requestPermission !== 'function') return
-    try {
-      const p = await DeviceOrientationEvent.requestPermission()
-      if (p === 'granted') {
-        window.addEventListener('deviceorientation', onOrientation, true)
-        window.addEventListener('deviceorientationabsolute', onOrientation, true)
-        setGyroEnabled(true)
-        setGyroAsked(true)
-      } else {
-        setGyroAsked(true) // asked but denied — manual mode
-      }
-    } catch(e) {
-      setGyroAsked(true)
-    }
   }
 
   function doCapture() {
@@ -355,13 +320,36 @@ export default function Scan() {
       <div style={s.startInner}>
         <div style={{fontSize:56}}>📸</div>
         <h1 style={s.h1}>Scan Your Property</h1>
-        <p style={s.sub}>Stand in center of room. Rotate phone to follow the white ring toward the red dot. Takes ~2 min.</p>
+        <p style={s.sub}>Stand in center of room. Rotate phone until the white ring meets the red dot. Takes ~2 min.</p>
         <div style={s.steps}>
-          {[['1','Stand still in center of room'],['2','White ring shows where to point'],['3','Rotate phone until red dot is inside ring'],['4','Auto-captures when aligned']].map(([n,t]) => (
+          {[['1','Stand still in center of room'],['2','White ring shows where to aim'],['3','Rotate until red dot enters ring'],['4','Holds still → auto captures']].map(([n,t]) => (
             <div key={n} style={s.step}><div style={s.stepNum}>{n}</div>{t}</div>
           ))}
         </div>
-        <button style={s.primaryBtn} onClick={startCapture}>Start Scanning</button>
+        {/* iOS: request gyro FIRST from direct tap, then start camera */}
+        <button style={s.primaryBtn} onClick={async () => {
+          // Step 1: request gyro permission directly from tap
+          if (typeof DeviceOrientationEvent !== 'undefined' &&
+              typeof DeviceOrientationEvent.requestPermission === 'function') {
+            try {
+              const p = await DeviceOrientationEvent.requestPermission()
+              if (p === 'granted') {
+                window.addEventListener('deviceorientation', onOrientation, true)
+                window.addEventListener('deviceorientationabsolute', onOrientation, true)
+                setGyroEnabled(true)
+              }
+            } catch(e) { console.warn('gyro denied', e) }
+          } else {
+            // Non-iOS: add listener directly
+            window.addEventListener('deviceorientation', onOrientation, true)
+            window.addEventListener('deviceorientationabsolute', onOrientation, true)
+            setGyroEnabled(true)
+          }
+          // Step 2: start camera
+          await startCapture()
+        }}>
+          Start Scanning
+        </button>
       </div>
     </div>
   )
@@ -457,21 +445,7 @@ export default function Scan() {
         <button style={{fontSize:13,color:'rgba(255,255,255,0.6)',background:'none',border:'1px solid rgba(255,255,255,0.2)',padding:'8px 16px',borderRadius:20,cursor:'pointer',minWidth:60,WebkitTapHighlightColor:'transparent'}} onClick={skipShot}>Skip</button>
       </div>
 
-      {/* iOS gyro permission button - must be tapped directly */}
-      {!gyroEnabled && !gyroAsked && typeof window !== 'undefined' &&
-       typeof DeviceOrientationEvent !== 'undefined' &&
-       typeof DeviceOrientationEvent.requestPermission === 'function' && (
-        <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%)',zIndex:40,textAlign:'center'}}>
-          <button
-            onClick={enableGyroIOS}
-            style={{background:'#6496ff',color:'white',border:'none',padding:'16px 28px',borderRadius:14,fontSize:16,fontWeight:700,cursor:'pointer',display:'block',marginBottom:10}}
-          >
-            📡 Enable Motion Tracking
-          </button>
-          <div style={{color:'rgba(255,255,255,0.7)',fontSize:12}}>Required for auto-aim</div>
-        </div>
-      )}
-      {!gyroEnabled && gyroAsked && (
+      {!gyroEnabled && (
         <div style={{position:'absolute',top:100,left:'50%',transform:'translateX(-50%)',background:'rgba(255,180,0,0.15)',border:'1px solid rgba(255,180,0,0.4)',color:'#ffb400',fontSize:12,padding:'6px 14px',borderRadius:20,zIndex:30,whiteSpace:'nowrap'}}>
           Manual mode — aim ring at red dot then tap capture
         </div>

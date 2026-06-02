@@ -28,9 +28,10 @@ export default function Scan() {
   const [completedDots, setCompletedDots] = useState([]) // {x,y} of captured targets
   const [targetPos, setTargetPos] = useState({x:180, y:300})
 
-  // White ring position on screen (moves as phone moves)
-  // Red dot is always fixed at 50%, 50%
-  const [ringPos, setRingPos] = useState({x:180, y:300})
+  // Arrow direction (degrees) pointing where to rotate
+  // 0=up, 90=right, 180=down, 270=left
+  const [arrowAngle, setArrowAngle] = useState(0)
+  const [distancePct, setDistancePct] = useState(100) // 0=aligned, 100=far
   const [debugInfo, setDebugInfo] = useState({alpha:0, beta:0, gamma:0, dyaw:0, dpitch:0})
   const [gyroAsked, setGyroAsked] = useState(false)
 
@@ -105,12 +106,12 @@ export default function Scan() {
   function updateForShot(shotIdx) {
     if (shotIdx >= TOTAL) return
     // Reset gyro base — recalibrate for each shot
-    baseYawRef.current = null
+    baseYawRef.current   = null
     basePitchRef.current = null
-    // Set initial ring position based on shot direction
-    const pos = shotToRingStartPos(shotIdx)
-    setRingPos(pos)
-    setTargetPos(pos)
+    currentYawRef.current   = 0
+    currentPitchRef.current = 0
+    setArrowAngle(0)
+    setDistancePct(100)
     const dirs = ['Front','Front-Right','Right','Back-Right','Back','Back-Left','Left','Front-Left']
     const [yaw, pitch] = SHOT_POSITIONS[shotIdx]
     const dir = dirs[Math.round(((yaw % 360) + 360) % 360 / 45) % 8]
@@ -151,43 +152,33 @@ export default function Scan() {
     const smoothYaw   = currentYawRef.current
     const smoothPitch = currentPitchRef.current
 
-    setDebugInfo({
-      alpha:  Math.round(yaw),
-      beta:   Math.round(pitch),
-      gamma:  Math.round(gamma),
-      dyaw:   Math.round(smoothYaw  * 10) / 10,
-      dpitch: Math.round(smoothPitch * 10) / 10
-    })
-
     const [tYaw, tPitch] = SHOT_POSITIONS[currentShotRef.current]
-    // Normalize target yaw to -180..180
     let tYawNorm = tYaw > 180 ? tYaw - 360 : tYaw
 
-    const W = window.innerWidth
-    const H = window.innerHeight
-    // Scale: how many px per degree — smaller = more forgiving
-    const scale = 5
+    // Error = how far off from target
+    const errYaw   = tYawNorm - smoothYaw
+    const errPitch = tPitch   - smoothPitch
 
-    // Ring starts at target offset, shrinks toward center as phone rotates toward target
-    const ringX = W/2 + (tYawNorm - smoothYaw)   * scale
-    const ringY = H/2 - (tPitch   - smoothPitch) * scale
+    // Arrow angle: atan2 gives direction to rotate toward
+    const arrowAngle = Math.atan2(errYaw, -errPitch) * 180 / Math.PI
 
-    const clampedX = Math.max(50, Math.min(W - 50, ringX))
-    const clampedY = Math.max(90, Math.min(H - 170, ringY))
-    setRingPos({ x: clampedX, y: clampedY })
+    // Distance 0-100% (100% = aligned, 0% = far away)
+    const totalErr = Math.sqrt(errYaw * errYaw + errPitch * errPitch)
+    const maxErr = 60  // degrees = fully empty ring
+    const proximity = Math.max(0, Math.min(100, (1 - totalErr / maxErr) * 100))
 
-    // Lock when ring is close to center red dot (40px radius = generous)
-    const dist = Math.sqrt(Math.pow(clampedX - W/2, 2) + Math.pow(clampedY - H/2, 2))
-    const LOCK_PX = 40
+    setArrowAngle(arrowAngle)
+    setDistancePct(100 - proximity)  // distancePct: 100=far, 0=aligned
 
-    if (dist < LOCK_PX && !lockedRef.current && !capturingRef.current) {
+    const LOCK_DEG = 12  // degrees tolerance
+
+    if (totalErr < LOCK_DEG && !lockedRef.current && !capturingRef.current) {
       lockedRef.current = true
       setLocked(true)
       lockTimerRef.current = setTimeout(() => {
         if (lockedRef.current) doCapture()
       }, LOCK_HOLD_MS)
-    } else if (dist >= LOCK_PX + 10 && lockedRef.current) {
-      // Hysteresis: need to move a bit further out to unlock
+    } else if (totalErr >= LOCK_DEG + 3 && lockedRef.current) {
       lockedRef.current = false
       setLocked(false)
       clearTimeout(lockTimerRef.current)
@@ -364,65 +355,66 @@ export default function Scan() {
       <canvas ref={canvasRef} style={{display:'none'}}/>
       {flash && <div style={{position:'absolute',inset:0,background:'#fff',zIndex:50,pointerEvents:'none'}}/>}
 
-      {/* SVG overlay */}
-      <svg style={{position:'absolute',inset:0,width:'100%',height:'100%',zIndex:15,pointerEvents:'none'}}>
-        {/* Completed green dots */}
-        {completedDots.map((d,i) => (
-          <g key={i}>
-            <circle cx={d.x} cy={d.y} r={10} fill="#32dc64" opacity={0.85}/>
-            <circle cx={d.x} cy={d.y} r={18} fill="none" stroke="#32dc64" strokeWidth={2} opacity={0.4}/>
-          </g>
-        ))}
-        {/* Trail line: ring → center red dot */}
-        <line
-          x1={ringPos.x} y1={ringPos.y}
-          x2="50%" y2="50%"
-          stroke={locked ? '#32dc64' : 'rgba(255,255,255,0.5)'}
-          strokeWidth={locked ? 3 : 1.5}
-          strokeDasharray={locked ? '0' : '8 5'}
-          strokeLinecap="round"
-        />
-        {/* Midpoint dot on trail */}
-        <circle
-          cx={(ringPos.x + window.innerWidth/2) / 2}
-          cy={(ringPos.y + window.innerHeight/2) / 2}
-          r={3}
-          fill={locked ? '#32dc64' : 'rgba(255,255,255,0.4)'}
-        />
-      </svg>
+      {/* Compass arrow UI — fixed at center */}
+      <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%)',zIndex:20,pointerEvents:'none',display:'flex',alignItems:'center',justifyContent:'center'}}>
+        {/* Proximity ring — fills as user gets closer */}
+        <svg width={160} height={160} style={{position:'absolute'}}>
+          {/* Completed dots around ring */}
+          {completedDots.map((d,i) => {
+            const angle = (i / TOTAL) * 360 - 90
+            const r = 72
+            const x = 80 + r * Math.cos(angle * Math.PI/180)
+            const y = 80 + r * Math.sin(angle * Math.PI/180)
+            return <circle key={i} cx={x} cy={y} r={5} fill="#32dc64"/>
+          })}
+          {/* Background ring */}
+          <circle cx={80} cy={80} r={68} fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth={6}/>
+          {/* Progress arc */}
+          <circle cx={80} cy={80} r={68}
+            fill="none"
+            stroke={locked ? '#32dc64' : '#6496ff'}
+            strokeWidth={6}
+            strokeDasharray={`${Math.max(0,(1-(distancePct/100))) * 427} 427`}
+            strokeLinecap="round"
+            transform="rotate(-90 80 80)"
+            style={{transition:'stroke-dasharray 0.15s, stroke 0.2s'}}
+          />
+        </svg>
 
-      {/* Moving white target ring */}
-      <div style={{
-        position:'absolute',
-        width: locked ? 70 : 80,
-        height: locked ? 70 : 80,
-        borderRadius:'50%',
-        border: `3px solid ${locked ? '#32dc64' : 'rgba(255,255,255,0.9)'}`,
-        left: ringPos.x,
-        top: ringPos.y,
-        transform:'translate(-50%,-50%)',
-        zIndex:20,
-        pointerEvents:'none',
-        transition:'border-color 0.2s, width 0.2s, height 0.2s',
-        boxShadow: locked ? '0 0 20px rgba(50,220,100,0.5)' : 'none',
-      }}>
-        <div style={{position:'absolute',width:10,height:10,background: locked ? '#32dc64' : 'white',borderRadius:'50%',top:'50%',left:'50%',transform:'translate(-50%,-50%)'}}/>
+        {/* Direction arrow — rotates to show where to point */}
+        {!locked && distancePct > 5 && (
+          <div style={{
+            position:'absolute',
+            width:0, height:0,
+            transform:`rotate(${arrowAngle}deg)`,
+            transition:'transform 0.15s',
+            display:'flex', alignItems:'center', justifyContent:'center',
+          }}>
+            <svg width={60} height={60} viewBox="0 0 60 60">
+              <polygon points="30,4 42,36 30,28 18,36" fill="white" opacity={0.9}/>
+            </svg>
+          </div>
+        )}
+
+        {/* Center dot */}
+        <div style={{
+          width: locked ? 28 : 22,
+          height: locked ? 28 : 22,
+          borderRadius:'50%',
+          background: locked ? '#32dc64' : '#ff3030',
+          border:'2.5px solid white',
+          boxShadow: locked ? '0 0 0 12px rgba(50,220,100,0.2)' : '0 0 0 5px rgba(255,48,48,0.2)',
+          transition:'all 0.2s',
+          zIndex:2,
+        }}/>
       </div>
 
-      {/* Fixed center red dot — phone aim */}
-      <div style={{
-        position:'absolute',
-        width:20, height:20,
-        borderRadius:'50%',
-        border:'2.5px solid white',
-        top:'50%', left:'50%',
-        transform:'translate(-50%,-50%)',
-        zIndex:25,
-        pointerEvents:'none',
-        background: locked ? '#32dc64' : '#ff3030',
-        boxShadow: locked ? '0 0 0 10px rgba(50,220,100,0.25)' : '0 0 0 5px rgba(255,48,48,0.25)',
-        transition:'background 0.2s, box-shadow 0.2s'
-      }}/>
+      {/* Proximity % text */}
+      {!locked && (
+        <div style={{position:'absolute',top:'calc(50% + 100px)',left:'50%',transform:'translateX(-50%)',color:'rgba(255,255,255,0.6)',fontSize:13,zIndex:20,pointerEvents:'none'}}>
+          {Math.round(100 - distancePct)}% aligned
+        </div>
+      )}
 
       {/* Status */}
       <div style={{position:'absolute',top:50,left:'50%',transform:'translateX(-50%)',background:'rgba(0,0,0,0.65)',color:'#fff',fontSize:14,fontWeight:500,padding:'7px 18px',borderRadius:20,zIndex:20,whiteSpace:'nowrap',border:'1px solid rgba(255,255,255,0.1)'}}>
@@ -458,7 +450,7 @@ export default function Scan() {
         <div>γ(gamma): {debugInfo.gamma}°</div>
         <div>Δyaw: {debugInfo.dyaw}°</div>
         <div>Δpitch: {debugInfo.dpitch}°</div>
-        <div>ring: {Math.round(ringPos.x)},{Math.round(ringPos.y)}</div>
+        <div>dist: {Math.round(distancePct)}%</div>
         <div>locked: {locked?'YES':'no'}</div>
       </div>
     </div>

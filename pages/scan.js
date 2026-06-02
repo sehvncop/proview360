@@ -129,7 +129,7 @@ export default function Scan() {
     if (Math.abs(dYaw) > halfW + 15 || Math.abs(dPitch) > halfH + 15) return null
 
     const x = W/2 + (dYaw   / halfW) * (W/2)
-    const y = H/2 - (dPitch / halfH) * (H/2)
+    const y = H/2 + (dPitch / halfH) * (H/2)  // + because tilt up = positive beta = dot goes UP on screen
     return { x, y }
   }
 
@@ -253,7 +253,7 @@ export default function Scan() {
         if (dYaw >  180) dYaw -= 360
         if (dYaw < -180) dYaw += 360
         const dPitch = shot.pitch - phonePitch.current
-        const angle = Math.atan2(dYaw, -dPitch)  // screen angle
+        const angle = Math.atan2(dYaw, dPitch)  // screen angle
 
         // Arrow pointing where to rotate
         const arrowR = 90

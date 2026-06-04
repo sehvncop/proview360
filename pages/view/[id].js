@@ -12,7 +12,7 @@ export default function ViewListing() {
   const [currentShot, setCurrentShot] = useState(0)
   const [viewerReady, setViewerReady] = useState(false)
   const mountRef = useRef(null)
-  const sceneRef = useRef(null)
+  const viewerInstanceRef = useRef(null)
 
   useEffect(() => {
     if (!id) return
@@ -28,116 +28,71 @@ export default function ViewListing() {
 
   function initViewer(shots) {
     if (typeof window === 'undefined') return
-    // Load Three.js dynamically
-    if (!window.THREE) {
+    
+    // Load Pannellum dynamically
+    if (!window.pannellum) {
+      // 1. Inject Pannellum CSS
+      if (!document.getElementById('pannellum-css')) {
+        const link = document.createElement('link')
+        link.id = 'pannellum-css'
+        link.rel = 'stylesheet'
+        link.href = 'https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css'
+        document.head.appendChild(link)
+      }
+      
+      // 2. Inject Pannellum JS
       const script = document.createElement('script')
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js'
-      script.onload = () => setupThree(shots)
+      script.src = 'https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js'
+      script.onload = () => setupPannellum(shots, 0)
       document.head.appendChild(script)
     } else {
-      setupThree(shots)
+      setupPannellum(shots, 0)
     }
   }
 
-  function setupThree(shots) {
-    const THREE = window.THREE
-    const el = mountRef.current
-    if (!el) return
+  function setupPannellum(shots, idx) {
+    if (!mountRef.current || !shots[idx]?.url) return
 
-    // Scene
-    const scene = new THREE.Scene()
-    const camera = new THREE.PerspectiveCamera(80, el.clientWidth / el.clientHeight, 1, 1100)
-    camera.target = new THREE.Vector3(0, 0, 0)
+    // Destroy existing viewer if switching shots
+    cleanupViewer()
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
-    renderer.setSize(el.clientWidth, el.clientHeight)
-    renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
-    el.appendChild(renderer.domElement)
-
-    // Sphere
-    const geo = new THREE.SphereGeometry(500, 64, 32)
-    geo.scale(-1, 1, 1)
-    const sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x111122 }))
-    scene.add(sphere)
-
-    sceneRef.current = { scene, camera, renderer, sphere, shots, currentIdx: 0, autoRotate: true }
-
-    // Load first shot
-    loadShotTexture(0, shots, sphere)
-
-    // Controls
-    let dragging = false, lastX = 0, lastY = 0
-    let lon = 0, lat = 0
-    let autoRotate = true
-
-    el.addEventListener('mousedown', e => { dragging = true; autoRotate = false; sceneRef.current.autoRotate = false; lastX = e.clientX; lastY = e.clientY })
-    el.addEventListener('touchstart', e => { dragging = true; autoRotate = false; sceneRef.current.autoRotate = false; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY }, { passive: true })
-    window.addEventListener('mouseup', () => dragging = false)
-    window.addEventListener('touchend', () => dragging = false)
-    window.addEventListener('mousemove', e => {
-      if (!dragging) return
-      lon -= (e.clientX - lastX) * 0.2; lat += (e.clientY - lastY) * 0.12
-      lastX = e.clientX; lastY = e.clientY
-    })
-    window.addEventListener('touchmove', e => {
-      if (!dragging) return
-      lon -= (e.touches[0].clientX - lastX) * 0.2; lat += (e.touches[0].clientY - lastY) * 0.12
-      lastX = e.touches[0].clientX; lastY = e.touches[0].clientY
-    }, { passive: true })
-    el.addEventListener('wheel', e => {
-      camera.fov = Math.max(30, Math.min(100, camera.fov + e.deltaY * 0.04))
-      camera.updateProjectionMatrix()
-      e.preventDefault()
-    }, { passive: false })
-
-    // Animate
-    function animate() {
-      if (!sceneRef.current) return
-      sceneRef.current._animId = requestAnimationFrame(animate)
-      if (sceneRef.current.autoRotate) lon += 0.05
-      lat = Math.max(-85, Math.min(85, lat))
-      const phi = THREE.MathUtils.degToRad(90 - lat)
-      const theta = THREE.MathUtils.degToRad(lon)
-      camera.target.set(500 * Math.sin(phi) * Math.cos(theta), 500 * Math.cos(phi), 500 * Math.sin(phi) * Math.sin(theta))
-      camera.lookAt(camera.target)
-      renderer.render(scene, camera)
-    }
-    animate()
-
-    window.addEventListener('resize', () => {
-      if (!el || !sceneRef.current) return
-      camera.aspect = el.clientWidth / el.clientHeight
-      camera.updateProjectionMatrix()
-      renderer.setSize(el.clientWidth, el.clientHeight)
+    // Initialize new 360 Viewer
+    viewerInstanceRef.current = window.pannellum.viewer(mountRef.current, {
+      type: "equirectangular",
+      panorama: shots[idx].url,
+      autoLoad: true,
+      
+      // --- THE PHYSICS & ZOOM CONTROLS ---
+      autoRotate: -2,         // Gentle spin that stops when the user interacts
+      mouseZoom: true,        // Scroll wheel zoom
+      doubleClickZoom: true,  // Double-click to walk in
+      keyboardZoom: true,     // +/- keys to zoom
+      
+      // --- FOV LIMITS (Perfect for 4K) ---
+      hfov: 90,               // Starting width
+      minHfov: 40,            // Max zoom in (prevents blurring)
+      maxHfov: 120,           // Max zoom out
+      
+      showZoomCtrl: true,
+      showFullscreenCtrl: true,
+      compass: false
     })
 
-    setViewerReady(true)
-  }
-
-  function loadShotTexture(idx, shots, sphere) {
-    const THREE = window.THREE
-    if (!shots || !shots[idx]?.url) return
-    const loader = new THREE.TextureLoader()
-    loader.crossOrigin = 'anonymous'
-    loader.load(shots[idx].url, tex => {
-      tex.minFilter = THREE.LinearFilter
-      if (sphere) sphere.material = new THREE.MeshBasicMaterial({ map: tex })
-      if (sceneRef.current) sceneRef.current.autoRotate = true
-    })
+    // Listen for load completion to remove loading spinner
+    viewerInstanceRef.current.on('load', () => setViewerReady(true))
   }
 
   function switchShot(idx) {
     setCurrentShot(idx)
-    if (!sceneRef.current) return
-    sceneRef.current.autoRotate = false
-    loadShotTexture(idx, listing.shots, sceneRef.current.sphere)
-    setTimeout(() => { if (sceneRef.current) sceneRef.current.autoRotate = true }, 2000)
+    setViewerReady(false)
+    setupPannellum(listing.shots, idx)
   }
 
   function cleanupViewer() {
-    if (sceneRef.current?._animId) cancelAnimationFrame(sceneRef.current._animId)
-    if (sceneRef.current?.renderer) sceneRef.current.renderer.dispose()
-    sceneRef.current = null
+    if (viewerInstanceRef.current) {
+      viewerInstanceRef.current.destroy()
+      viewerInstanceRef.current = null
+    }
   }
 
   if (loading) return <div style={s.loading}>Loading tour…</div>
@@ -169,7 +124,7 @@ export default function ViewListing() {
           <div ref={mountRef} style={s.viewer}/>
           <div style={s.roomTag}>360° View · Shot {currentShot + 1}/{shots.length}</div>
           {!viewerReady && <div style={s.viewerLoading}><div style={s.spinner}/><span>Loading 360° view…</span></div>}
-          <div style={s.dragHint}>👆 Drag to look around</div>
+          <div style={s.dragHint}>👆 Drag to look around · Scroll to zoom</div>
         </div>
 
         {/* Shot nav thumbnails */}
@@ -224,7 +179,8 @@ const s = {
   headerTitle: { fontSize:14, fontWeight:600, flex:1, textAlign:'center', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' },
   badge: (s) => ({ fontSize:11, padding:'3px 10px', borderRadius:20, background: s==='for_sale' ? 'rgba(50,220,100,0.2)':'rgba(255,160,50,0.2)', color: s==='for_sale' ? '#32dc64':'#ffb400', fontWeight:600, flexShrink:0, whiteSpace:'nowrap' }),
   viewerWrap: { position:'relative', width:'100%', height:'60vw', minHeight:280, maxHeight:420, background:'#111122', overflow:'hidden' },
-  viewer: { width:'100%', height:'100%', cursor:'grab', display:'block' },
+  // IMPORTANT: Pannellum requires block display with explicit width/height
+  viewer: { width:'100%', height:'100%', display:'block' },
   roomTag: { position:'absolute', top:12, left:12, background:'rgba(0,0,0,0.6)', color:'#fff', fontSize:11, fontWeight:500, padding:'4px 12px', borderRadius:20, pointerEvents:'none', backdropFilter:'blur(4px)' },
   viewerLoading: { position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:12, background:'rgba(15,15,20,0.9)', fontSize:14, color:'#aaa' },
   dragHint: { position:'absolute', bottom:10, left:'50%', transform:'translateX(-50%)', background:'rgba(0,0,0,0.5)', color:'rgba(255,255,255,0.8)', fontSize:11, padding:'4px 12px', borderRadius:20, pointerEvents:'none', whiteSpace:'nowrap' },

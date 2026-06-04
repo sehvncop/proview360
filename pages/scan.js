@@ -26,15 +26,17 @@ const SHOTS = [
   { yaw:0,   pitch:-60, label:'Floor Front' },
   { yaw:180, pitch:-60, label:'Floor Back' },
 ]
+
 const TOTAL   = SHOTS.length
-const HIT_PX  = 45   // crosshair must be within this many px of dot
-const HOLD_MS = 600  // hold time before auto-capture
+const HIT_PX  = 45   
+const HOLD_MS = 600  
+const MAX_DIM = 1920 // Hardware RAM protection limit for the canvas
 
 export default function Scan() {
   const router = useRouter()
   const videoRef   = useRef(null)
-  const captureRef = useRef(null) // hidden canvas for photo
-  const overlayRef = useRef(null) // AR canvas
+  const captureRef = useRef(null) 
+  const overlayRef = useRef(null) 
   const animRef    = useRef(null)
 
   const [screen, setScreen]   = useState('onboard')
@@ -47,14 +49,14 @@ export default function Scan() {
     bathrooms:'', area_sqft:'', dealer_name:'', dealer_phone:'', status:'for_sale'
   })
 
-  // Gyro — single calibration, never reset
+  // Gyro State
   const calibrated  = useRef(false)
   const baseYaw     = useRef(0)
   const basePitch   = useRef(0)
-  const phoneYaw    = useRef(0)  // current smoothed yaw delta from base
-  const phonePitch  = useRef(0)  // current smoothed pitch delta from base
+  const phoneYaw    = useRef(0)  
+  const phonePitch  = useRef(0)  
 
-  // Capture state
+  // Capture State
   const shotIdxRef  = useRef(0)
   const doneRef     = useRef(new Set())
   const photosRef   = useRef([])
@@ -63,14 +65,18 @@ export default function Scan() {
   const holding     = useRef(false)
   const capturing   = useRef(false)
   const streamRef   = useRef(null)
-  const gyroEnabled = useRef(false)
 
-  useEffect(() => () => {
-    stopCamera()
-    cancelAnimationFrame(animRef.current)
-    clearInterval(holdTimer.current)
-    window.removeEventListener('deviceorientation', onGyro, true)
-    window.removeEventListener('deviceorientationabsolute', onGyro, true)
+  useEffect(() => {
+    // Lock orientation to portrait if browser supports it
+    if (screen.orientation && screen.orientation.lock) {
+      screen.orientation.lock('portrait').catch(() => {})
+    }
+    return () => {
+      stopCamera()
+      cancelAnimationFrame(animRef.current)
+      clearInterval(holdTimer.current)
+      window.removeEventListener('deviceorientation', onGyro, true)
+    }
   }, [])
 
   function stopCamera() {
@@ -78,15 +84,14 @@ export default function Scan() {
     streamRef.current = null
   }
 
-  // ── Gyro — calibrate ONCE, then accumulate delta forever ─────────
+  // ── Gyro — Calibrate ONCE, accumulate delta forever ─────────
   const onGyro = useCallback((e) => {
     if (e.alpha == null || e.beta == null) return
     if (e.alpha === 0 && e.beta === 0 && e.gamma === 0) return
 
-    const rawYaw   = e.alpha          // 0–360 compass
-    const rawPitch = e.beta - 90      // normalize: phone upright = 0
+    const rawYaw   = e.alpha          
+    const rawPitch = e.beta - 90      
 
-    // Calibrate on very first reading only
     if (!calibrated.current) {
       baseYaw.current   = rawYaw
       basePitch.current = rawPitch
@@ -94,50 +99,46 @@ export default function Scan() {
       return
     }
 
-    // Yaw delta — wrap correctly
     let dy = rawYaw - baseYaw.current
     if (dy >  180) dy -= 360
     if (dy < -180) dy += 360
     const dp = rawPitch - basePitch.current
 
-    // Smooth (low-pass filter)
+    // Low-pass filter to smooth sensor jitter
     phoneYaw.current   = phoneYaw.current   * 0.75 + dy * 0.25
     phonePitch.current = phonePitch.current * 0.75 + dp * 0.25
   }, [])
 
   // ── Project sphere dot → screen pixel ────────────────────────────
-  // dot is fixed at (dotYaw, dotPitch) in world space
-  // phone is currently pointing at (phoneYaw, phonePitch) relative to calibration
   function project(dotYaw, dotPitch) {
     const cv = overlayRef.current
     if (!cv) return null
     const W = cv.width, H = cv.height
 
-    // Angular error between dot and where phone is pointing
     let dYaw = dotYaw - phoneYaw.current
     if (dYaw >  180) dYaw -= 360
     if (dYaw < -180) dYaw += 360
     const dPitch = dotPitch - phonePitch.current
 
-    // Phone FOV ~65° H, ~50° V — project linearly onto screen
+    // Assumed field of view for standard smartphone main lens
     const FOV_H = 65
     const FOV_V = 50
     const halfW = FOV_H / 2
     const halfH = FOV_V / 2
 
-    // Dot is visible if within FOV
+    // Cull dots outside the viewport
     if (Math.abs(dYaw) > halfW + 15 || Math.abs(dPitch) > halfH + 15) return null
 
     const x = W/2 + (dYaw   / halfW) * (W/2)
-    const y = H/2 + (dPitch / halfH) * (H/2)  // + because tilt up = positive beta = dot goes UP on screen
+    const y = H/2 + (dPitch / halfH) * (H/2)  
     return { x, y }
   }
 
-  // ── AR render loop ────────────────────────────────────────────────
+  // ── High-Performance AR Render Loop ────────────────────────────────
   function startARLoop() {
     const cv  = overlayRef.current
     if (!cv) return
-    const ctx = cv.getContext('2d')
+    const ctx = cv.getContext('2d', { alpha: false }) // Optimize compositing
 
     function draw() {
       animRef.current = requestAnimationFrame(draw)
@@ -148,9 +149,9 @@ export default function Scan() {
       const W = cv.width, H = cv.height
       const cx = W/2, cy = H/2
 
-      // ── Draw all sphere dots ──
       let currentProj = null
 
+      // Draw active dots
       SHOTS.forEach((shot, i) => {
         const pos = project(shot.yaw, shot.pitch)
         if (!pos) return
@@ -162,7 +163,7 @@ export default function Scan() {
 
         if (isCurrent) currentProj = { ...pos, dist: distToCrosshair, isHit }
 
-        // Outer glow for current target
+        // Outer Target Glow
         if (isCurrent && !isDone) {
           const grd = ctx.createRadialGradient(pos.x, pos.y, 10, pos.x, pos.y, 55)
           grd.addColorStop(0, isHit ? 'rgba(50,220,100,0.3)' : 'rgba(255,255,255,0.12)')
@@ -173,20 +174,14 @@ export default function Scan() {
           ctx.fill()
         }
 
-        // Dot body
+        // Core Dot
         const r = isCurrent ? (isDone ? 12 : 20) : (isDone ? 8 : 12)
         ctx.beginPath()
         ctx.arc(pos.x, pos.y, r, 0, Math.PI*2)
-        if (isDone) {
-          ctx.fillStyle = '#32dc64'
-        } else if (isCurrent) {
-          ctx.fillStyle = isHit ? '#32dc64' : '#ffffff'
-        } else {
-          ctx.fillStyle = 'rgba(255,255,255,0.4)'
-        }
+        ctx.fillStyle = isDone ? '#32dc64' : (isCurrent ? (isHit ? '#32dc64' : '#ffffff') : 'rgba(255,255,255,0.4)')
         ctx.fill()
 
-        // Dashed ring around current target
+        // Aiming Ring
         if (isCurrent && !isDone) {
           ctx.beginPath()
           ctx.arc(pos.x, pos.y, r + 10, 0, Math.PI*2)
@@ -195,10 +190,8 @@ export default function Scan() {
           ctx.lineWidth = 2
           ctx.stroke()
           ctx.setLineDash([])
-        }
-
-        // Label below current dot
-        if (isCurrent && !isDone) {
+          
+          // Label
           ctx.font = 'bold 14px -apple-system,sans-serif'
           ctx.textAlign = 'center'
           ctx.fillStyle = isHit ? '#32dc64' : 'rgba(255,255,255,0.9)'
@@ -208,12 +201,10 @@ export default function Scan() {
           ctx.shadowBlur = 0
         }
 
-        // Hold-progress arc on current dot while hitting
+        // Progress Arc
         if (isCurrent && isHit && holdProg.current > 0) {
           ctx.beginPath()
-          ctx.arc(pos.x, pos.y, r + 16,
-            -Math.PI/2,
-            -Math.PI/2 + holdProg.current * Math.PI * 2)
+          ctx.arc(pos.x, pos.y, r + 16, -Math.PI/2, -Math.PI/2 + holdProg.current * Math.PI * 2)
           ctx.strokeStyle = '#32dc64'
           ctx.lineWidth = 4
           ctx.lineCap = 'round'
@@ -221,41 +212,36 @@ export default function Scan() {
         }
       })
 
-      // ── Crosshair (always center, always on top) ──
+      // Crosshair
       const isAiming = currentProj?.isHit
       const crossColor = isAiming ? '#32dc64' : 'rgba(255,255,255,0.85)'
 
-      // Outer ring
       ctx.beginPath()
       ctx.arc(cx, cy, 30, 0, Math.PI*2)
       ctx.strokeStyle = isAiming ? 'rgba(50,220,100,0.6)' : 'rgba(255,255,255,0.3)'
       ctx.lineWidth = 1.5
       ctx.stroke()
 
-      // Cross arms
       ctx.strokeStyle = crossColor
       ctx.lineWidth = 2
       const arms = [[cx-22,cy,cx-10,cy],[cx+10,cy,cx+22,cy],[cx,cy-22,cx,cy-10],[cx,cy+10,cx,cy+22]]
       arms.forEach(([x1,y1,x2,y2]) => {
         ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke()
       })
-
-      // Center dot
       ctx.beginPath()
       ctx.arc(cx, cy, 4, 0, Math.PI*2)
       ctx.fillStyle = crossColor
       ctx.fill()
 
-      // ── Directional hint arrow (when current dot not visible) ──
+      // Directional Hint
       if (idx < TOTAL && !currentProj) {
         const shot = SHOTS[idx]
         let dYaw = shot.yaw - phoneYaw.current
         if (dYaw >  180) dYaw -= 360
         if (dYaw < -180) dYaw += 360
         const dPitch = shot.pitch - phonePitch.current
-        const angle = Math.atan2(dYaw, dPitch)  // screen angle
+        const angle = Math.atan2(dYaw, dPitch)  
 
-        // Arrow pointing where to rotate
         const arrowR = 90
         const ax = cx + Math.sin(angle) * arrowR
         const ay = cy - Math.cos(angle) * arrowR
@@ -273,14 +259,13 @@ export default function Scan() {
         ctx.fill()
         ctx.restore()
 
-        // Label
         ctx.font = '13px -apple-system,sans-serif'
         ctx.fillStyle = 'rgba(255,255,255,0.7)'
         ctx.textAlign = 'center'
         ctx.fillText(shot.label, cx, H - 155)
       }
 
-      // ── Hit detection & hold timer ──
+      // Hit Engine
       if (currentProj?.isHit && !holding.current && !capturing.current) {
         holding.current   = true
         holdProg.current  = 0
@@ -302,7 +287,7 @@ export default function Scan() {
     draw()
   }
 
-  // ── Capture photo ─────────────────────────────────────────────────
+  // ── RAM-Protected Photo Capture ────────────────────────────────────
   function doCapture() {
     const idx = shotIdxRef.current
     if (capturing.current || idx >= TOTAL) return
@@ -317,15 +302,26 @@ export default function Scan() {
     const vid = videoRef.current
     const cv  = captureRef.current
     if (!vid || !cv) { capturing.current = false; return }
-    cv.width  = vid.videoWidth  || 1280
-    cv.height = vid.videoHeight || 720
-    cv.getContext('2d').drawImage(vid, 0, 0)
 
+    // DOWN-SAMPLE LOGIC: Prevents iOS Safari from crashing when storing 19 images
+    let vw = vid.videoWidth
+    let vh = vid.videoHeight
+    
+    if (vw > MAX_DIM || vh > MAX_DIM) {
+      const ratio = Math.min(MAX_DIM / vw, MAX_DIM / vh)
+      vw = Math.round(vw * ratio)
+      vh = Math.round(vh * ratio)
+    }
+
+    cv.width  = vw
+    cv.height = vh
+    cv.getContext('2d').drawImage(vid, 0, 0, vw, vh)
+
+    // Encode to compressed JPEG Blob
     cv.toBlob(blob => {
       const url = URL.createObjectURL(blob)
       const shot = SHOTS[idx]
-      photosRef.current = [...photosRef.current,
-        { blob, url, yaw: shot.yaw, pitch: shot.pitch, index: idx }]
+      photosRef.current = [...photosRef.current, { blob, url, yaw: shot.yaw, pitch: shot.pitch, index: idx }]
       setPhotos([...photosRef.current])
       doneRef.current = new Set([...doneRef.current, idx])
 
@@ -339,61 +335,48 @@ export default function Scan() {
         stopCamera()
         setScreen('form')
       }
-    }, 'image/jpeg', 0.92)
+    }, 'image/jpeg', 0.85) // 85% compression saves massive amounts of RAM
   }
 
-  // ── Start ──────────────────────────────────────────────────────────
+  // ── Start Routine ──────────────────────────────────────────────────
   async function startScan() {
-    // Gyro first — must be in direct tap handler for iOS
-    if (typeof DeviceOrientationEvent !== 'undefined') {
-      if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-        try {
-          const p = await DeviceOrientationEvent.requestPermission()
-          if (p === 'granted') {
-            window.addEventListener('deviceorientation', onGyro, true)
-            window.addEventListener('deviceorientationabsolute', onGyro, true)
-            gyroEnabled.current = true
-          }
-        } catch(e) { console.warn('gyro', e) }
-      } else {
-        window.addEventListener('deviceorientation', onGyro, true)
-        window.addEventListener('deviceorientationabsolute', onGyro, true)
-        gyroEnabled.current = true
-      }
+    // iOS 13+ strict permission request
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        const p = await DeviceOrientationEvent.requestPermission()
+        if (p === 'granted') {
+          window.addEventListener('deviceorientation', onGyro, true)
+        } else {
+          alert('Gyroscope access is required to track the sphere.')
+          return
+        }
+      } catch(e) { console.warn('gyro error', e) }
+    } else {
+      window.addEventListener('deviceorientation', onGyro, true)
     }
 
     setScreen('capture')
     await new Promise(r => setTimeout(r, 80))
 
-    // Camera
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode:{ ideal:'environment' }, width:{ ideal:1920 }, height:{ ideal:1080 } },
+        video: { facingMode: { ideal: 'environment' } },
         audio: false
       })
       streamRef.current = stream
       videoRef.current.srcObject = stream
       await videoRef.current.play()
     } catch(e) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video:true, audio:false })
-        streamRef.current = stream
-        videoRef.current.srcObject = stream
-        await videoRef.current.play()
-      } catch(e2) {
-        stopCamera(); setScreen('onboard')
-        alert('Camera blocked.\nSettings → Privacy & Security → Camera → Safari → ON')
-        return
-      }
+      stopCamera(); setScreen('onboard')
+      alert('Camera blocked. Settings → Privacy & Security → Safari → Camera → ON')
+      return
     }
 
-    // Wait for video dimensions
     await new Promise(resolve => {
       const check = () => videoRef.current?.videoWidth > 0 ? resolve() : setTimeout(check, 100)
       check(); setTimeout(resolve, 3000)
     })
 
-    // Size overlay to screen
     if (overlayRef.current) {
       overlayRef.current.width  = window.innerWidth
       overlayRef.current.height = window.innerHeight
@@ -406,8 +389,7 @@ export default function Scan() {
     const idx = shotIdxRef.current
     if (idx >= TOTAL) return
     const shot = SHOTS[idx]
-    photosRef.current = [...photosRef.current,
-      { blob:null, url:null, yaw:shot.yaw, pitch:shot.pitch, index:idx }]
+    photosRef.current = [...photosRef.current, { blob:null, url:null, yaw:shot.yaw, pitch:shot.pitch, index:idx }]
     doneRef.current = new Set([...doneRef.current, idx])
     const next = idx + 1
     shotIdxRef.current = next
@@ -442,18 +424,19 @@ export default function Scan() {
     }
   }
 
-  // ── ONBOARD ───────────────────────────────────────────────────────
+  // ── RENDER: ONBOARD ────────────────────────────────────────────────
   if (screen === 'onboard') return (
     <div style={s.page}>
-      <Head><title>Scan Property — PropView360</title>
-        <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"/>
+      <Head>
+        <title>Scan Property — PropView360</title>
+        <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,orientation=portrait"/>
       </Head>
       <div style={s.onboard}>
         <div style={{fontSize:64}}>🏠</div>
         <h1 style={s.h1}>Stand in the Center of the Room</h1>
         <p style={s.sub}>
-          White dots will appear fixed on your walls, ceiling and floor.
-          Rotate your phone to find each dot — aim the crosshair at it and hold still to capture.
+          Hold your phone <b>vertically (portrait)</b>. White dots will appear on your walls, ceiling and floor.
+          Rotate to find each dot and hold still to capture.
         </p>
         <div style={s.tips}>
           {[
@@ -474,10 +457,11 @@ export default function Scan() {
     </div>
   )
 
-  // ── CAPTURE ───────────────────────────────────────────────────────
+  // ── RENDER: CAPTURE ────────────────────────────────────────────────
   if (screen === 'capture') return (
-    <div style={{position:'fixed',inset:0,background:'#000',overflow:'hidden'}}>
-      <Head><title>Scanning — PropView360</title>
+    <div style={{position:'fixed',inset:0,background:'#000',overflow:'hidden',touchAction:'none'}}>
+      <Head>
+        <title>Scanning — PropView360</title>
         <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"/>
       </Head>
       <video ref={videoRef} autoPlay playsInline muted
@@ -485,45 +469,40 @@ export default function Scan() {
       <canvas ref={captureRef} style={{display:'none'}}/>
       <canvas ref={overlayRef}
         style={{position:'absolute',inset:0,width:'100%',height:'100%',zIndex:10,pointerEvents:'none'}}/>
+      
       {flash && <div style={{position:'absolute',inset:0,background:'#fff',zIndex:50,pointerEvents:'none'}}/>}
 
-      {/* Progress bar */}
       <div style={{position:'absolute',top:0,left:0,right:0,height:4,zIndex:30,background:'rgba(255,255,255,0.1)'}}>
         <div style={{height:'100%',background:'#32dc64',width:`${(shotIdx/TOTAL)*100}%`,transition:'width 0.4s'}}/>
       </div>
 
-      {/* Shot label */}
       <div style={{position:'absolute',top:44,left:'50%',transform:'translateX(-50%)',zIndex:20,
         background:'rgba(0,0,0,0.65)',color:'#fff',fontSize:14,fontWeight:500,
         padding:'7px 18px',borderRadius:20,whiteSpace:'nowrap',border:'1px solid rgba(255,255,255,0.1)'}}>
         {shotIdx >= TOTAL ? '✅ All done!' : `${SHOTS[shotIdx].label} · ${shotIdx}/${TOTAL}`}
       </div>
 
-      {/* Bottom controls */}
       <div style={{position:'absolute',bottom:0,left:0,right:0,zIndex:20,
-        padding:'16px 24px 44px',
-        background:'linear-gradient(to top,rgba(0,0,0,0.85),transparent)',
+        padding:'16px 24px 44px', background:'linear-gradient(to top,rgba(0,0,0,0.85),transparent)',
         display:'flex',alignItems:'center',justifyContent:'space-between'}}>
         <div style={{fontSize:13,color:'rgba(255,255,255,0.5)',minWidth:60}}>{shotIdx}/{TOTAL}</div>
-        <button style={{width:64,height:64,borderRadius:'50%',
-          border:'3px solid rgba(255,255,255,0.8)',
-          background:'rgba(255,255,255,0.12)',cursor:'pointer',
-          display:'flex',alignItems:'center',justifyContent:'center',
+        <button style={{width:64,height:64,borderRadius:'50%', border:'3px solid rgba(255,255,255,0.8)',
+          background:'rgba(255,255,255,0.12)',cursor:'pointer', display:'flex',alignItems:'center',justifyContent:'center',
           WebkitTapHighlightColor:'transparent'}} onClick={doCapture}>
           <div style={{width:46,height:46,borderRadius:'50%',background:'white'}}/>
         </button>
         <button style={{fontSize:13,color:'rgba(255,255,255,0.45)',background:'none',
-          border:'1px solid rgba(255,255,255,0.15)',padding:'8px 16px',
-          borderRadius:20,cursor:'pointer',WebkitTapHighlightColor:'transparent'}}
+          border:'1px solid rgba(255,255,255,0.15)',padding:'8px 16px', borderRadius:20,cursor:'pointer',WebkitTapHighlightColor:'transparent'}}
           onClick={skipShot}>Skip</button>
       </div>
     </div>
   )
 
-  // ── FORM ──────────────────────────────────────────────────────────
+  // ── RENDER: FORM ──────────────────────────────────────────────────
   if (screen === 'form') return (
     <div style={s.page}>
-      <Head><title>Property Details — PropView360</title>
+      <Head>
+        <title>Property Details — PropView360</title>
         <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"/>
       </Head>
       <div style={s.formWrap}>
@@ -566,6 +545,7 @@ export default function Scan() {
     </div>
   )
 
+  // ── RENDER: UPLOADING ──────────────────────────────────────────────
   if (screen === 'uploading') return (
     <div style={{...s.page,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:20}}>
       <div style={{fontSize:48}}>☁️</div>
@@ -577,6 +557,7 @@ export default function Scan() {
     </div>
   )
 
+  // ── RENDER: DONE ───────────────────────────────────────────────────
   if (screen === 'done') return (
     <div style={{...s.page,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:16}}>
       <div style={{fontSize:64}}>🎉</div>

@@ -1,4 +1,3 @@
-
 import { useEffect, useState, useRef } from 'react';
 import JSZip from 'jszip';
 
@@ -214,14 +213,18 @@ export default function Scan() {
   async function createZip() {
     const zip = new JSZip();
     const folder = zip.folder('propview360');
-    shots.forEach((shot, index) => {
+
+    // Process shots sequentially to avoid overwhelming the browser
+    for (let i = 0; i < shots.length; i++) {
+      const shot = shots[i];
       if (shot.uri) {
         // Convert data URL to blob
         const response = await fetch(shot.uri);
         const blob = await response.blob();
-        folder.file(`${shot.face.toLowerCase()}_${index + 1}.jpg`, blob);
+        folder.file(`${shot.face.toLowerCase()}_${i + 1}.jpg`, blob);
       }
-    });
+    }
+
     const content = await zip.generateAsync({ type: 'blob' });
     setZipBlob(content);
     setDownloadUrl(URL.createObjectURL(content));
@@ -298,7 +301,7 @@ export default function Scan() {
         style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
       />
       {/* Controls overlay */}
-      <div style={{ position: 'absolute', bottom: 20, left: 0, right: 0, padding: 0 20, color: white, textAlign: 'center', zIndex: 10 }}>
+      <div style={{ position: 'absolute', bottom: 20, left: 0, right: 0, padding: '0 20px', color: white, textAlign: 'center', zIndex: 10 }}>
         {!isScanning && !isCompleted && (
           <button
             onClick={startScanning}

@@ -1,3 +1,4 @@
+
 import { useEffect, useState, useRef } from 'react';
 import JSZip from 'jszip';
 
@@ -58,8 +59,8 @@ export default function Scan() {
         const stream = videoRef.current.srcObject;
         stream.getTracks().forEach(track => track.stop());
       }
-      window.removeEventListener('deviceorientationabsolute', handleOrientation);
-      window.removeEventListener('deviceorientation', handleOrientationFallback);
+      window.removeEventListener('deviceorientationabsolute', handleOrientation, true);
+      window.removeEventListener('deviceorientation', handleOrientationFallback, true);
       if (captureTimeout) {
         clearTimeout(captureTimeout);
       }

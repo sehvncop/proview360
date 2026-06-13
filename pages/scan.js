@@ -1,384 +1,497 @@
-import { useEffect, useState, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import JSZip from 'jszip';
 
-export default function Scan() {
+// 6-face cube shot positions — fixed in world space
+// Each face = one required shot. Phone points at dot = capture.
+const CUBE_FACES = [
+  { id: 'front',  label: 'Front',        yaw:   0, pitch:  0,  icon: '⬆️' },
+  { id: 'right',  label: 'Right',        yaw:  90, pitch:  0,  icon: '➡️' },
+  { id: 'back',   label: 'Back',         yaw: 180, pitch:  0,  icon: '⬇️' },
+  { id: 'left',   label: 'Left',         yaw: 270, pitch:  0,  icon: '⬅️' },
+  { id: 'up',     label: 'Up (Ceiling)', yaw:   0, pitch: 90,  icon: '🔼' },
+  { id: 'down',   label: 'Down (Floor)', yaw:   0, pitch: -75, icon: '🔽' },
+];
+
+// How close phone must point to target to auto-capture (degrees)
+const CAPTURE_THRESHOLD = 12;
+// Cooldown between captures (ms)
+const CAPTURE_COOLDOWN = 1800;
+
+export default function ScanPage() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [error, setError] = useState(null);
-  const [isScanning, setIsScanning] = useState(false);
-  const [currentFace, setCurrentFace] = useState(0); // 0:Front, 1:Right, 2:Back, 3:Left, 4:Up, 5:Down
-  const [shots, setShots] = useState([]); // array of {face, uri}
-  const [captureTimeout, setCaptureTimeout] = useState(null);
-  const [captureProgress, setCaptureProgress] = useState(0); // 0 to 100
-  const [isCompleted, setIsCompleted] = useState(false);
-  const [zipBlob, setZipBlob] = useState(null);
-  const [downloadUrl, setDownloadUrl] = useState(null);
+  const overlayCanvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const lastCaptureTime = useRef(0);
+  const calibrationRef = useRef(null); // yaw/pitch offset at calibration
 
-  const faces = [
-    { name: 'Front', yaw: 0, pitch: 0 },
-    { name: 'Right', yaw: 90, pitch: 0 },
-    { name: 'Back', yaw: 180, pitch: 0 },
-    { name: 'Left', yaw: -90, pitch: 0 },
-    { name: 'Up', yaw: 0, pitch: -90 },
-    { name: 'Down', yaw: 0, pitch: 90 },
-  ];
+  const [roomName, setRoomName] = useState('');
+  const [scanning, setScanning] = useState(false);
+  const [currentFaceIdx, setCurrentFaceIdx] = useState(0);
+  const [capturedFaces, setCapturedFaces] = useState({}); // faceId -> blob
+  const [deviceOrientation, setDeviceOrientation] = useState({ yaw: 0, pitch: 0 });
+  const [alignAngle, setAlignAngle] = useState(999); // degrees off target
+  const [phase, setPhase] = useState('setup'); // setup | calibrate | scanning | done
+  const [permError, setPermError] = useState(false);
+  const [status, setStatus] = useState('');
+  const [zipping, setZipping] = useState(false);
 
-  // Gyro state
-  let alpha = 0, beta = 0, gamma = 0; // deviceorientationabsolute
-  let refAlpha = 0, refBeta = 0, refGamma = 0; // reference orientation
-  let isCalibrated = false;
+  // ── Camera ──────────────────────────────────────────────────────────────────
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 3840 }, height: { ideal: 2160 } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) videoRef.current.srcObject = stream;
+    } catch (e) {
+      setPermError(true);
+    }
+  };
 
-  // Start camera and sensors
-  useEffect(() => {
-    async function start() {
+  const stopCamera = () => {
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+  };
+
+  // ── Gyro ─────────────────────────────────────────────────────────────────────
+  const requestGyro = async () => {
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-          audio: false
-        });
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-        setIsStreaming(true);
+        const perm = await DeviceOrientationEvent.requestPermission();
+        if (perm !== 'granted') { setPermError(true); return false; }
+      } catch { setPermError(true); return false; }
+    }
+    return true;
+  };
 
-        // Listen for device orientation
-        window.addEventListener('deviceorientationabsolute', handleOrientation, true);
-        window.addEventListener('deviceorientation', handleOrientationFallback, true);
-      } catch (err) {
-        setError(`Camera error: ${err.message}`);
-        console.error(err);
+  useEffect(() => {
+    if (phase !== 'calibrate' && phase !== 'scanning') return;
+
+    const handler = (e) => {
+      // alpha = compass heading (yaw 0-360), beta = front-back tilt (pitch -180..180)
+      const rawYaw   = e.alpha ?? 0;
+      const rawPitch = e.beta  ?? 0;  // beta: 90 = horizontal, 0 = face up
+
+      // Convert beta to -90..90 pitch: 90° = looking at horizon, 0° = looking up
+      // beta 90 = horizontal = pitch 0, beta 0 = face-up = pitch -90
+      const pitchDeg = rawPitch - 90; // so horizontal = 0, ceiling = -90
+
+      if (phase === 'calibrate') {
+        setDeviceOrientation({ yaw: rawYaw, pitch: pitchDeg });
+        return;
+      }
+
+      // In scanning phase: apply calibration offset
+      const cal = calibrationRef.current;
+      if (!cal) return;
+
+      // Offset so that calibration position = yaw 0, pitch 0 (front face target)
+      let yaw = rawYaw - cal.yaw;
+      if (yaw < 0) yaw += 360;
+      if (yaw > 360) yaw -= 360;
+      const pitch = pitchDeg - cal.pitch;
+
+      setDeviceOrientation({ yaw, pitch });
+    };
+
+    window.addEventListener('deviceorientation', handler, true);
+    return () => window.removeEventListener('deviceorientation', handler, true);
+  }, [phase]);
+
+  // ── Dot alignment check ───────────────────────────────────────────────────────
+  useEffect(() => {
+    if (phase !== 'scanning') return;
+
+    const target = CUBE_FACES[currentFaceIdx];
+    const { yaw, pitch } = deviceOrientation;
+
+    // Angular distance in yaw (handle 360 wrap)
+    let dyaw = Math.abs(yaw - target.yaw);
+    if (dyaw > 180) dyaw = 360 - dyaw;
+    const dpitch = Math.abs(pitch - target.pitch);
+
+    const angle = Math.sqrt(dyaw * dyaw + dpitch * dpitch);
+    setAlignAngle(angle);
+
+    // Auto-capture when aligned
+    if (angle <= CAPTURE_THRESHOLD) {
+      const now = Date.now();
+      if (now - lastCaptureTime.current > CAPTURE_COOLDOWN) {
+        lastCaptureTime.current = now;
+        captureShot(target.id);
       }
     }
+  }, [deviceOrientation, currentFaceIdx, phase]);
 
-    start();
+  // ── Draw overlay dot ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas || phase !== 'scanning') return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
 
-    return () => {
-      // Cleanup
-      if (videoRef.current.srcObject) {
-        const stream = videoRef.current.srcObject;
-        stream.getTracks().forEach(track => track.stop());
-      }
-      window.removeEventListener('deviceorientationabsolute', handleOrientation, true);
-      window.removeEventListener('deviceorientation', handleOrientationFallback, true);
-      if (captureTimeout) {
-        clearTimeout(captureTimeout);
-      }
-    };
+    const target = CUBE_FACES[currentFaceIdx];
+    const { yaw, pitch } = deviceOrientation;
+
+    // Map the DIFFERENCE between current and target to screen offset
+    let dyaw = yaw - target.yaw;
+    if (dyaw > 180) dyaw -= 360;
+    if (dyaw < -180) dyaw += 360;
+    const dpitch = pitch - target.pitch;
+
+    // Scale: 1° = 6px (so ±15° fills ~half screen width on mobile)
+    const scale = 6;
+    const cx = W / 2 - dyaw * scale;
+    const cy = H / 2 + dpitch * scale;
+
+    const aligned = alignAngle <= CAPTURE_THRESHOLD;
+    const r = 22;
+
+    // Outer ring (target crosshair at screen center)
+    ctx.beginPath();
+    ctx.arc(W / 2, H / 2, r + 12, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Crosshair lines at center
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(W/2 - 40, H/2); ctx.lineTo(W/2 + 40, H/2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(W/2, H/2 - 40); ctx.lineTo(W/2, H/2 + 40); ctx.stroke();
+
+    // Moving dot — clamped to stay visible on screen
+    const dotX = Math.max(r + 4, Math.min(W - r - 4, cx));
+    const dotY = Math.max(r + 4, Math.min(H - r - 4, cy));
+
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, r, 0, Math.PI * 2);
+    ctx.fillStyle = aligned ? 'rgba(0,255,120,0.92)' : 'rgba(255,60,60,0.88)';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    if (aligned) {
+      // Check mark
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(dotX - 9, dotY);
+      ctx.lineTo(dotX - 3, dotY + 7);
+      ctx.lineTo(dotX + 9, dotY - 7);
+      ctx.stroke();
+    }
+
+    // Label: which face + angle remaining
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${target.icon} Point at ${target.label}`, W / 2, H - 80);
+    if (!aligned) {
+      ctx.font = '12px sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.fillText(`${Math.round(alignAngle)}° off`, W / 2, H - 60);
+    }
+  }, [deviceOrientation, currentFaceIdx, alignAngle, phase]);
+
+  // ── Capture ───────────────────────────────────────────────────────────────────
+  const captureShot = useCallback((faceId) => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+
+    canvas.width  = video.videoWidth  || 1920;
+    canvas.height = video.videoHeight || 1080;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    canvas.toBlob((blob) => {
+      setCapturedFaces(prev => {
+        const updated = { ...prev, [faceId]: blob };
+        // Advance to next uncaptured face
+        const nextIdx = CUBE_FACES.findIndex((f, i) => i > CUBE_FACES.findIndex(f2 => f2.id === faceId) && !updated[f.id]);
+        if (nextIdx !== -1) {
+          setCurrentFaceIdx(nextIdx);
+          setStatus(`✅ ${CUBE_FACES.find(f=>f.id===faceId).label} captured! Now: ${CUBE_FACES[nextIdx].label}`);
+        } else {
+          setPhase('done');
+          setStatus('All 6 shots captured!');
+          stopCamera();
+        }
+        return updated;
+      });
+    }, 'image/jpeg', 0.92);
   }, []);
 
-  // Handle device orientation
-  function handleOrientation(event) {
-    // Use absolute if available, else fallback
-    if (event.absolute) {
-      alpha = event.alpha;
-      beta = event.beta;
-      gamma = event.gamma;
-    } else {
-      // fallback to relative
-      alpha = event.alpha;
-      beta = event.beta;
-      gamma = event.gamma;
-    }
+  // ── Flow control ──────────────────────────────────────────────────────────────
+  const handleStart = async () => {
+    if (!roomName.trim()) { alert('Enter room name first'); return; }
+    await startCamera();
+    const ok = await requestGyro();
+    if (!ok) return;
+    setPhase('calibrate');
+    setStatus('Point phone straight ahead at horizon, then tap Calibrate');
+  };
 
-    if (!isCalibrated && isScanning) {
-      // Calibrate on first reading after start scanning
-      refAlpha = alpha;
-      refBeta = beta;
-      refGamma = gamma;
-      isCalibrated = true;
-    }
-  }
+  const handleCalibrate = () => {
+    // Save current orientation as the "front" reference (yaw=0, pitch=0)
+    calibrationRef.current = { ...deviceOrientation };
+    setCapturedFaces({});
+    setCurrentFaceIdx(0);
+    setPhase('scanning');
+    setStatus('Follow the dot. It auto-captures when aligned.');
+  };
 
-  // Fallback for older browsers
-  function handleOrientationFallback(event) {
-    alpha = event.alpha;
-    beta = event.beta;
-    gamma = event.gamma;
-  }
-
-  // Calculate current orientation relative to reference
-  function getRelativeOrientation() {
-    if (!isCalibrated) return { yaw: 0, pitch: 0 };
-
-    // Convert to radians
-    const toRad = (deg) => deg * Math.PI / 180;
-    const toDeg = (rad) => rad * 180 / Math.PI;
-
-    const a1 = toRad(refAlpha);
-    const b1 = toRad(refBeta);
-    const g1 = toRad(refGamma);
-    const a2 = toRad(alpha);
-    const b2 = toRad(beta);
-    const g2 = toRad(gamma);
-
-    // We only care about yaw (alpha) and pitch (beta) for simplicity, ignoring roll (gamma)
-    // In reality, we should use a proper rotation matrix or quaternion, but for demo we use simple subtraction
-    const yaw = toDeg(a2 - a1);
-    const pitch = toDeg(b2 - b1);
-
-    // Normalize yaw to [-180, 180]
-    let normalizedYaw = yaw;
-    while (normalizedYaw > 180) normalizedYaw -= 360;
-    while (normalizedYaw < -180) normalizedYaw += 360;
-
-    return { yaw: normalizedYaw, pitch };
-  }
-
-  // Start scanning
-  function startScanning() {
-    setIsScanning(true);
-    setIsCompleted(false);
-    setShots([]);
-    setCurrentFace(0);
-    setCaptureProgress(0);
-    if (captureTimeout) clearTimeout(captureTimeout);
-    isCalibrated = false; // will calibrate on first sensor reading
-  }
-
-  // Retry current face
-  function retryFace() {
-    setCaptureProgress(0);
-    if (captureTimeout) clearTimeout(captureTimeout);
-  }
-
-  // Capture photo when aligned
-  function checkAlignment() {
-    const { yaw, pitch } = getRelativeOrientation();
-    const face = faces[currentFace];
-    const errorYaw = face.yaw - yaw;
-    const errorPitch = face.pitch - pitch;
-
-    // Convert error to screen position
-    const canvas = canvasRef.current;
-    const centerX = canvas.width / 2;
-    const centerY = canvas.height / 2;
-    const scale = Math.min(canvas.width, canvas.height) / 2; // 90 degrees maps to half the canvas size
-    const dotX = centerX + (errorYaw / 90) * scale;
-    const dotY = centerY - (errorPitch / 90) * scale; // pitch negative is up, so subtract
-
-    const distance = Math.sqrt(Math.pow(dotX - centerX, 2) + Math.pow(dotY - centerY, 2));
-    const tolerance = 30; // pixels
-
-    if (distance < tolerance) {
-      // Aligned, increase progress
-      const newProgress = Math.min(captureProgress + 1, 100);
-      setCaptureProgress(newProgress);
-      if (newProgress >= 100) {
-        // Capture photo
-        capturePhoto();
-      }
-    } else {
-      // Not aligned, reset progress
-      setCaptureProgress(0);
-    }
-
-    // Draw UI
-    drawUI(dotX, dotY, distance, tolerance);
-  }
-
-  // Capture photo from video
-  function capturePhoto() {
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
-    const video = videoRef.current;
-
-    // Draw current video frame to canvas
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const imageUrl = canvas.toDataURL('image/jpeg', 0.9);
-
-    // Store shot
-    const newShots = [...shots];
-    newShots[currentFace] = { face: faces[currentFace].name, uri: imageUrl };
-    setShots(newShots);
-
-    // Move to next face
-    const nextFace = currentFace + 1;
-    if (nextFace < faces.length) {
-      setCurrentFace(nextFace);
-      setCaptureProgress(0);
-      setTimeout(() => {
-        // Start checking alignment for next face
-        if (captureTimeout) clearTimeout(captureTimeout);
-        captureTimeout = setInterval(checkAlignment, 100);
-      }, 500);
-    } else {
-      // All faces captured
-      setIsScanning(false);
-      setIsCompleted(true);
-      createZip();
-    }
-  }
-
-  // Create ZIP of all shots
-  async function createZip() {
+  const handleDownloadZip = async () => {
+    setZipping(true);
     const zip = new JSZip();
-    const folder = zip.folder('propview360');
+    const folder = zip.folder(roomName.replace(/\s+/g, '_'));
 
-    // Process shots sequentially to avoid overwhelming the browser
-    for (let i = 0; i < shots.length; i++) {
-      const shot = shots[i];
-      if (shot.uri) {
-        // Convert data URL to blob
-        const response = await fetch(shot.uri);
-        const blob = await response.blob();
-        folder.file(`${shot.face.toLowerCase()}_${i + 1}.jpg`, blob);
+    // meta.json — face yaw/pitch for stitcher
+    const meta = {
+      room: roomName,
+      capturedAt: new Date().toISOString(),
+      faces: CUBE_FACES.map(f => ({
+        id: f.id,
+        label: f.label,
+        filename: `${f.id}.jpg`,
+        yaw: f.yaw,
+        pitch: f.pitch,
+      })),
+    };
+    folder.file('meta.json', JSON.stringify(meta, null, 2));
+
+    for (const face of CUBE_FACES) {
+      if (capturedFaces[face.id]) {
+        folder.file(`${face.id}.jpg`, capturedFaces[face.id]);
       }
     }
 
-    const content = await zip.generateAsync({ type: 'blob' });
-    setZipBlob(content);
-    setDownloadUrl(URL.createObjectURL(content));
-  }
+    const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 3 } });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${roomName.replace(/\s+/g, '_')}.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setZipping(false);
+  };
 
-  // Draw UI on canvas
-  function drawUI(dotX, dotY, distance, tolerance) {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = canvas.getContext('2d');
-    const { width, height } = canvas;
-    const centerX = width / 2;
-    const centerY = height / 2;
+  const handleReset = () => {
+    stopCamera();
+    setCapturedFaces({});
+    setCurrentFaceIdx(0);
+    setAlignAngle(999);
+    calibrationRef.current = null;
+    setPhase('setup');
+    setStatus('');
+  };
 
-    // Clear canvas
-    context.clearRect(0, 0, width, height);
-
-    // Draw video frame
-    const video = videoRef.current;
-    context.drawImage(video, 0, 0, width, height);
-
-    // Draw tolerance circle
-    context.beginPath();
-    context.arc(centerX, centerY, tolerance, 0, 2 * Math.PI);
-    context.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-    context.lineWidth = 2;
-    context.stroke();
-
-    // Draw dot
-    context.beginPath();
-    context.arc(dotX, dotY, 5, 0, 2 * Math.PI);
-    context.fillStyle = distance < tolerance ? 'rgba(0, 255, 0, 0.8)' : 'rgba(255, 0, 0, 0.8)';
-    context.fill();
-
-    // Draw face name
-    context.fillStyle = 'white';
-    context.font = '16px Arial';
-    context.textAlign = 'center';
-    context.fillText(faces[currentFace].name, centerX, 30);
-
-    // Draw progress bar
-    context.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    context.fillRect(centerX - 100, height - 30, 200, 20);
-    context.fillStyle = 'rgba(0, 255, 0, 0.8)';
-    context.fillRect(centerX - 100, height - 30, 2 * captureProgress, 20);
-    context.strokeStyle = 'white';
-    context.lineWidth = 2;
-    context.strokeRect(centerX - 100, height - 30, 200, 20);
-
-    // Draw completed faces
-    context.fillStyle = 'rgba(255, 255, 255, 0.7)';
-    context.font = '14px Arial';
-    context.textAlign = 'left';
-    shots.forEach((shot, index) => {
-      if (shot.uri) {
-        context.fillText(`${shot.face}: ✓`, 20, 20 * (index + 1) + 20);
-      }
-    });
-  }
-
-  // Main render
+  // ── Render ────────────────────────────────────────────────────────────────────
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100vh', overflow: 'hidden', backgroundColor: '#000' }}>
-      {/* Video */}
-      <video
-        ref={videoRef}
-        style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover' }}
-        playsInline
-        muted
-      />
-      {/* Canvas for UI */}
-      <canvas
-        ref={canvasRef}
-        style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
-      />
-      {/* Controls overlay */}
-      <div style={{ position: 'absolute', bottom: 20, left: 0, right: 0, padding: '0 20px', color: white, textAlign: 'center', zIndex: 10 }}>
-        {!isScanning && !isCompleted && (
-          <button
-            onClick={startScanning}
+    <div style={{ background: '#0a0a0a', minHeight: '100vh', color: '#fff', fontFamily: 'sans-serif' }}>
+
+      {/* Hidden capture canvas */}
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
+
+      {/* ── SETUP ── */}
+      {phase === 'setup' && (
+        <div style={{ padding: '40px 24px', maxWidth: 440, margin: '0 auto' }}>
+          <h1 style={{ fontSize: 24, marginBottom: 8 }}>📸 Room Scanner</h1>
+          <p style={{ color: '#888', marginBottom: 28, fontSize: 14 }}>
+            6 shots per room. Follow the dot. Auto-captures when aligned.
+          </p>
+
+          <label style={{ display: 'block', marginBottom: 8, fontSize: 13, color: '#aaa' }}>Room Name</label>
+          <input
+            value={roomName}
+            onChange={e => setRoomName(e.target.value)}
+            placeholder="e.g. Living Room"
             style={{
-              padding: '12px 24px',
-              fontSize: '16px',
-              backgroundColor: '#007aff',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer'
+              width: '100%', padding: '12px 16px', borderRadius: 10, border: '1px solid #333',
+              background: '#1a1a1a', color: '#fff', fontSize: 16, boxSizing: 'border-box', marginBottom: 24,
+            }}
+          />
+
+          {permError && (
+            <p style={{ color: '#f66', fontSize: 13, marginBottom: 16 }}>
+              Camera or gyro permission denied. Allow both in browser settings.
+            </p>
+          )}
+
+          <button
+            onClick={handleStart}
+            style={{
+              width: '100%', padding: '15px', borderRadius: 12, border: 'none',
+              background: roomName.trim() ? '#2563eb' : '#333', color: '#fff',
+              fontSize: 16, fontWeight: 600, cursor: roomName.trim() ? 'pointer' : 'not-allowed',
             }}
           >
             Start Scanning
           </button>
-        )}
-        {isScanning && !isCompleted && (
-          <div>
-            <button
-              onClick={retryFace}
-              style={{
-                marginRight: '10px',
-                padding: '8px 16px',
-                fontSize: '14px',
-                backgroundColor: '#ff9500',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer'
-              }}
-            >
-              Retry
-            </button>
-            <button
-              disabled
-              style={{
-                padding: '8px 16px',
-                fontSize: '14px',
-                backgroundColor: captureProgress >= 100 ? '#34c759' : '#ff3b30',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: captureProgress >= 100 ? 'pointer' : 'not-allowed'
-              }}
-            >
-              {captureProgress >= 100 ? 'Capture' : `Align... ${captureProgress}%`}
-            </button>
+
+          <div style={{ marginTop: 32, padding: 16, background: '#111', borderRadius: 12 }}>
+            <p style={{ fontSize: 13, color: '#888', margin: 0, lineHeight: 1.6 }}>
+              <strong style={{ color: '#aaa' }}>How it works:</strong><br />
+              Stand in centre of room. Phone asks you to point at 6 directions (Front, Right, Back, Left, Ceiling, Floor).
+              Move phone slowly — green dot = shot captured. Total time ~30 seconds per room.
+            </p>
           </div>
-        )}
-        {isCompleted && (
-          <div>
-            <p style={{ margin: '10px 0' }}>Scan complete! Creating ZIP...</p>
-            {downloadUrl && (
-              <a
-                href={downloadUrl}
-                download="propview360.zip"
-                style={{
-                  display: 'inline-block',
-                  padding: '12px 24px',
-                  fontSize: '16px',
-                  backgroundColor: '#34c759',
-                  color: 'white',
-                  textDecoration: 'none',
-                  borderRadius: '4px'
-                }}
-              >
-                Download ZIP
-              </a>
-            )}
+        </div>
+      )}
+
+      {/* ── CALIBRATE ── */}
+      {phase === 'calibrate' && (
+        <div style={{ padding: '40px 24px', maxWidth: 440, margin: '0 auto', textAlign: 'center' }}>
+          <h2 style={{ marginBottom: 12 }}>Calibrate Direction</h2>
+          <p style={{ color: '#aaa', marginBottom: 32, fontSize: 14 }}>
+            Point phone <strong>straight ahead at eye level</strong>. This becomes your Front reference.
+          </p>
+
+          <div style={{
+            background: '#111', borderRadius: 16, padding: '24px',
+            marginBottom: 32, fontSize: 13, color: '#888', textAlign: 'left',
+          }}>
+            <div>Yaw (compass): <strong style={{ color: '#fff' }}>{Math.round(deviceOrientation.yaw)}°</strong></div>
+            <div>Pitch (tilt): <strong style={{ color: '#fff' }}>{Math.round(deviceOrientation.pitch)}°</strong></div>
+            <div style={{ marginTop: 8, color: '#666', fontSize: 12 }}>
+              Hold phone horizontally, screen facing you, camera pointing forward.
+            </div>
           </div>
-        )}
-        {error && (
-          <div style={{ marginTop: '10px', color: '#ff3b30', fontSize: '14px' }}>
-            {error}
+
+          <button
+            onClick={handleCalibrate}
+            style={{
+              width: '100%', padding: '15px', borderRadius: 12, border: 'none',
+              background: '#2563eb', color: '#fff', fontSize: 16, fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            Calibrate & Start
+          </button>
+        </div>
+      )}
+
+      {/* ── SCANNING ── */}
+      {phase === 'scanning' && (
+        <div style={{ position: 'relative', width: '100vw', height: '100vh', overflow: 'hidden', background: '#000' }}>
+
+          {/* Live camera feed */}
+          <video
+            ref={videoRef}
+            autoPlay playsInline muted
+            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+          />
+
+          {/* Dot overlay */}
+          <canvas
+            ref={overlayCanvasRef}
+            width={window.innerWidth}
+            height={window.innerHeight}
+            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+          />
+
+          {/* Top HUD */}
+          <div style={{
+            position: 'absolute', top: 0, left: 0, right: 0,
+            padding: '16px 20px',
+            background: 'linear-gradient(to bottom, rgba(0,0,0,0.7), transparent)',
+          }}>
+            <div style={{ fontSize: 13, color: '#aaa', marginBottom: 4 }}>{roomName}</div>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>
+              Shot {Object.keys(capturedFaces).length + 1} of 6 — {CUBE_FACES[currentFaceIdx]?.label}
+            </div>
           </div>
-        )}
-      </div>
+
+          {/* Face progress dots */}
+          <div style={{
+            position: 'absolute', bottom: 30, left: 0, right: 0,
+            display: 'flex', justifyContent: 'center', gap: 10,
+          }}>
+            {CUBE_FACES.map((face, i) => (
+              <div key={face.id} style={{
+                width: 12, height: 12, borderRadius: '50%',
+                background: capturedFaces[face.id] ? '#22c55e'
+                          : i === currentFaceIdx ? '#fff'
+                          : '#444',
+                border: i === currentFaceIdx ? '2px solid #fff' : '2px solid transparent',
+                transition: 'background 0.2s',
+              }} title={face.label} />
+            ))}
+          </div>
+
+          {/* Status */}
+          {status ? (
+            <div style={{
+              position: 'absolute', top: '50%', left: '50%',
+              transform: 'translate(-50%, -50%) translateY(-80px)',
+              background: 'rgba(0,0,0,0.75)', padding: '10px 20px', borderRadius: 20,
+              fontSize: 14, color: '#fff', whiteSpace: 'nowrap', pointerEvents: 'none',
+            }}>
+              {status}
+            </div>
+          ) : null}
+
+          {/* Alignment badge */}
+          <div style={{
+            position: 'absolute', top: 70, right: 16,
+            background: alignAngle <= CAPTURE_THRESHOLD ? 'rgba(34,197,94,0.9)' : 'rgba(0,0,0,0.6)',
+            padding: '6px 12px', borderRadius: 20, fontSize: 13, fontWeight: 600,
+            transition: 'background 0.2s',
+          }}>
+            {alignAngle <= CAPTURE_THRESHOLD ? '✅ Aligned' : `${Math.round(alignAngle)}° off`}
+          </div>
+        </div>
+      )}
+
+      {/* ── DONE ── */}
+      {phase === 'done' && (
+        <div style={{ padding: '40px 24px', maxWidth: 440, margin: '0 auto' }}>
+          <h2 style={{ marginBottom: 8 }}>✅ Room Captured</h2>
+          <p style={{ color: '#aaa', marginBottom: 28, fontSize: 14 }}>All 6 faces done for <strong>{roomName}</strong>.</p>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 28 }}>
+            {CUBE_FACES.map(face => (
+              <div key={face.id} style={{
+                background: capturedFaces[face.id] ? '#14532d' : '#1a1a1a',
+                border: `1px solid ${capturedFaces[face.id] ? '#22c55e' : '#333'}`,
+                borderRadius: 10, padding: '10px 8px', textAlign: 'center', fontSize: 13,
+              }}>
+                <div style={{ fontSize: 20, marginBottom: 4 }}>{face.icon}</div>
+                <div style={{ color: '#ccc' }}>{face.label}</div>
+                {capturedFaces[face.id] && <div style={{ color: '#22c55e', fontSize: 11, marginTop: 2 }}>✓</div>}
+              </div>
+            ))}
+          </div>
+
+          <button
+            onClick={handleDownloadZip}
+            disabled={zipping}
+            style={{
+              width: '100%', padding: '15px', borderRadius: 12, border: 'none',
+              background: '#2563eb', color: '#fff', fontSize: 16, fontWeight: 600,
+              cursor: 'pointer', marginBottom: 12,
+            }}
+          >
+            {zipping ? 'Creating ZIP...' : `⬇️ Download ${roomName.replace(/\s+/g, '_')}.zip`}
+          </button>
+
+          <button
+            onClick={handleReset}
+            style={{
+              width: '100%', padding: '15px', borderRadius: 12, border: '1px solid #333',
+              background: 'transparent', color: '#aaa', fontSize: 16, cursor: 'pointer',
+            }}
+          >
+            Scan Another Room
+          </button>
+        </div>
+      )}
     </div>
   );
 }

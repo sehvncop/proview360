@@ -1,832 +1,1061 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import Head from 'next/head'
+import JSZip from 'jszip'
 
-/**
- * PropView360 — Matterport-style capture
- *
- * EXACT Matterport UX (from screenshot analysis):
- * - Live camera feed fills the screen
- * - As you rotate phone, coverage map builds in real time
- * - Uncaptured zones = black overlay (shows gaps)
- * - Captured zones = camera feed shows through (no overlay)
- * - Small white target dot = where to aim
- * - Separate capture button
- * - Undo last capture
- * - X to exit
- * - NO floating AR dots, NO gyro-based dot tracking
- *
- * HOW IT WORKS:
- * - Gyro tracks phone orientation continuously
- * - Coverage grid (36×18 cells = 10° each) marks which directions are captured
- * - Black overlay drawn over uncaptured cells using canvas
- * - Auto-captures when crosshair stays in uncovered zone for 0.5s
- * - Builds 6-face cubemap from captures at end
- */
+export default function ScanPage() {
+  // ─── States ───
+  const [screen, setScreen] = useState('start')      // start | capture | review
+  const [roomName, setRoomName] = useState('')
+  const [positionLabel, setPositionLabel] = useState('Position 1')
+  const [capturing, setCapturing] = useState(false)
+  const [capturedCount, setCapturedCount] = useState(0)
+  const [totalNeeded] = useState(32)                 // 32 shots for good coverage
+  const [coveragePct, setCoveragePct] = useState(0)
+  const [isLocked, setIsLocked] = useState(false)
+  const [flash, setFlash] = useState(false)
+  const [gyroStatus, setGyroStatus] = useState('checking') // checking | granted | denied | unavailable
+  const [debugInfo, setDebugInfo] = useState('')
+  const [thumbnails, setThumbnails] = useState([])
+  const [currentTarget, setCurrentTarget] = useState({ yaw: 0, pitch: 0 })
+  const [showUndo, setShowUndo] = useState(false)
 
-const FACE_SIZE   = 512   // px per cubemap face (matches Matterport)
-const THUMB_SIZE  = 540   // thumbnail size
-const GRID_H      = 36    // horizontal cells (360° / 10°)
-const GRID_V      = 18    // vertical cells (180° / 10°)
-const FOV_H       = 62    // phone camera horizontal FOV
-const FOV_V       = 48    // phone camera vertical FOV
-const AUTO_CAP_MS = 500   // ms to hold before auto-capture
+  // ─── Refs ───
+  const videoRef = useRef(null)
+  const canvasRef = useRef(null)
+  const streamRef = useRef(null)
+  const gyroRef = useRef({ alpha: 0, beta: 0, gamma: 0, absolute: false })
+  const baseOrientationRef = useRef(null)            // calibrated at start
+  const shotsRef = useRef([])                        // all captured shots
+  const coverageMapRef = useRef(new Set())           // "yaw,pitch" strings
+  const targetQueueRef = useRef([])                  // remaining targets
+  const currentTargetRef = useRef({ yaw: 0, pitch: 0 })
+  const lockTimerRef = useRef(null)
+  const isProcessingRef = useRef(false)
+  const smoothOrientationRef = useRef({ yaw: 0, pitch: 0 })
 
-const ROOM_PRESETS = [
-  'Living Room','Master Bedroom','Bedroom 2','Bedroom 3',
-  'Kitchen','Dining Room','Bathroom','Master Bathroom',
-  'Balcony','Study Room','Pooja Room','Store Room',
-]
+  // ─── Generate target grid (like Matterport sweep positions) ───
+  const generateTargets = useCallback(() => {
+    const targets = []
+    const yawSteps = 8    // 45° apart
+    const pitchSteps = 4  // from -60° to +60°
 
-function generateSweepId() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-    const r = Math.random() * 16 | 0
-    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16).toUpperCase()
-  })
-}
-
-export default function Scan() {
-  const videoRef    = useRef(null)
-  const captureRef  = useRef(null)   // hidden full-res canvas
-  const faceRef     = useRef(null)   // 512×512 face canvas
-  const thumbRef    = useRef(null)   // thumbnail canvas
-  const overlayRef  = useRef(null)   // coverage mask overlay
-  const animRef     = useRef(null)
-
-  const [screen, setScreen]               = useState('home')
-  const [roomName, setRoomName]           = useState('')
-  const [customRoom, setCustomRoom]       = useState('')
-  const [positionIdx, setPositionIdx]     = useState(0)
-  const [flash, setFlash]                 = useState(false)
-  const [completedRooms, setCompletedRooms] = useState([])
-  const [zipping, setZipping]             = useState(false)
-  const [thumbUrls, setThumbUrls]         = useState([])
-  const [gyroActive, setGyroActive]       = useState(false)
-  const [coveragePct, setCoveragePct]     = useState(0)
-  const [captureCount, setCaptureCount]   = useState(0)
-
-  // Gyro — absolute compass
-  const phoneYaw    = useRef(0)   // 0-360 absolute compass
-  const phonePitch  = useRef(0)   // normalized pitch (-90 to +90)
-  const calibrated  = useRef(false)
-  const baseYaw     = useRef(0)
-
-  // Coverage grid — true = captured
-  const grid        = useRef(Array(GRID_H * GRID_V).fill(false))
-
-  // Capture state
-  const sweepsRef       = useRef([])
-  const currentCaptures = useRef([])  // [{blob, yaw, pitch}] for current position
-  const currentSweepId  = useRef(null)
-  const holdTimer       = useRef(null)
-  const holdStart       = useRef(null)
-  const holdProg        = useRef(0)
-  const isHolding       = useRef(false)
-  const capturing       = useRef(false)
-  const streamRef       = useRef(null)
-  const lastCaptures    = useRef([])  // for undo
-
-  function stopCamera() {
-    streamRef.current?.getTracks().forEach(t => t.stop())
-    streamRef.current = null
-    cancelAnimationFrame(animRef.current)
-    window.removeEventListener('deviceorientation', onGyro, true)
-    window.removeEventListener('deviceorientationabsolute', onGyro, true)
-    clearTimeout(holdTimer.current)
-  }
-
-  // ── Gyro handler ──────────────────────────────────────────────────
-  const onGyro = useCallback((e) => {
-    if (e.alpha == null || e.beta == null) return
-    if (e.alpha === 0 && e.beta === 0 && e.gamma === 0) return
-
-    const rawYaw   = e.alpha
-    const rawPitch = e.beta - 90
-
-    phoneYaw.current   = phoneYaw.current   * 0.55 + rawYaw   * 0.45
-    phonePitch.current = phonePitch.current * 0.55 + rawPitch * 0.45
-
-    if (!calibrated.current) {
-      baseYaw.current    = rawYaw
-      phoneYaw.current   = rawYaw
-      phonePitch.current = rawPitch
-      calibrated.current = true
+    for (let p = 0; p < pitchSteps; p++) {
+      const pitch = -60 + (p * 40)  // -60, -20, +20, +60
+      for (let y = 0; y < yawSteps; y++) {
+        const yaw = y * 45  // 0, 45, 90, 135, 180, 225, 270, 315
+        targets.push({ yaw, pitch, captured: false })
+      }
     }
+
+    // Shuffle for better UX (not sequential)
+    for (let i = targets.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[targets[i], targets[j]] = [targets[j], targets[i]]
+    }
+
+    return targets
   }, [])
 
-  // ── Grid cell for a given yaw/pitch ──────────────────────────────
-  function getGridCell(yawDeg, pitchDeg) {
-    // yaw relative to base
-    let relYaw = ((yawDeg - baseYaw.current) + 360) % 360
-    // pitch: -90 to +90 → 0 to 180
-    let relPitch = pitchDeg + 90
-    const col = Math.floor((relYaw  / 360) * GRID_H) % GRID_H
-    const row = Math.floor((relPitch / 180) * GRID_V) % GRID_V
-    return { col, row, idx: row * GRID_H + col }
-  }
-
-  // Mark cells covered by current phone orientation (FOV)
-  function markCurrentFOV(yaw, pitch) {
-    const hCells = Math.ceil((FOV_H / 360) * GRID_H)  // ~6 cells wide
-    const vCells = Math.ceil((FOV_V / 180) * GRID_V)  // ~5 cells tall
-    const center = getGridCell(yaw, pitch)
-    let marked = 0
-    for (let dr = -Math.floor(vCells/2); dr <= Math.floor(vCells/2); dr++) {
-      for (let dc = -Math.floor(hCells/2); dc <= Math.floor(hCells/2); dc++) {
-        const col = ((center.col + dc) + GRID_H) % GRID_H
-        const row = Math.max(0, Math.min(GRID_V-1, center.row + dr))
-        const idx = row * GRID_H + col
-        if (!grid.current[idx]) { grid.current[idx] = true; marked++ }
-      }
-    }
-    return marked
-  }
-
-  // Coverage percentage
-  function getCoverage() {
-    const captured = grid.current.filter(Boolean).length
-    return Math.round((captured / (GRID_H * GRID_V)) * 100)
-  }
-
-  // ── AR overlay render loop ────────────────────────────────────────
-  function startARLoop() {
-    const cv  = overlayRef.current
-    if (!cv) return
-    const ctx = cv.getContext('2d')
-
-    function draw() {
-      animRef.current = requestAnimationFrame(draw)
-      const W = cv.width, H = cv.height
-      ctx.clearRect(0, 0, W, H)
-
-      const currentYaw   = phoneYaw.current
-      const currentPitch = phonePitch.current
-      const base         = baseYaw.current
-
-      // ── Draw black mask over uncaptured zones ─────────────────────
-      // Each grid cell maps to a screen region based on current phone orientation
-      const cellW = W / (FOV_H / (360/GRID_H))   // px per cell
-      const cellH = H / (FOV_V / (180/GRID_V))
-
-      // How many cells fit in FOV
-      const hVisible = Math.ceil(FOV_H / (360/GRID_H)) + 2
-      const vVisible = Math.ceil(FOV_V / (180/GRID_V)) + 2
-
-      // Center cell
-      const centerCell = getGridCell(currentYaw, currentPitch)
-
-      for (let dr = -Math.floor(vVisible/2)-1; dr <= Math.floor(vVisible/2)+1; dr++) {
-        for (let dc = -Math.floor(hVisible/2)-1; dc <= Math.floor(hVisible/2)+1; dc++) {
-          const col = ((centerCell.col + dc) + GRID_H) % GRID_H
-          const row = Math.max(0, Math.min(GRID_V-1, centerCell.row + dr))
-          const idx = row * GRID_H + col
-
-          // Screen position of this cell
-          const screenX = W/2 + dc * cellW - cellW/2
-          const screenY = H/2 + dr * cellH - cellH/2
-
-          if (!grid.current[idx]) {
-            // Uncaptured — draw black with slight transparency
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.82)'
-            ctx.fillRect(screenX, screenY, cellW + 1, cellH + 1)
-          }
-        }
-      }
-
-      // ── Crosshair — fixed center ──────────────────────────────────
-      const cx = W/2, cy = H/2
-      const isCurrentCaptured = grid.current[getGridCell(currentYaw, currentPitch).idx]
-
-      // Outer ring
-      ctx.beginPath()
-      ctx.arc(cx, cy, 28, 0, Math.PI*2)
-      ctx.strokeStyle = isCurrentCaptured
-        ? 'rgba(50,220,100,0.5)'
-        : 'rgba(255,255,255,0.9)'
-      ctx.lineWidth = 2
-      ctx.stroke()
-
-      // Cross arms
-      const crossColor = isCurrentCaptured ? '#32dc64' : 'white'
-      ctx.strokeStyle = crossColor
-      ctx.lineWidth   = 2
-      ;[[cx-22,cy,cx-8,cy],[cx+8,cy,cx+22,cy],
-        [cx,cy-22,cx,cy-8],[cx,cy+8,cx,cy+22]].forEach(([x1,y1,x2,y2]) => {
-        ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke()
-      })
-
-      // Center dot
-      ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI*2)
-      ctx.fillStyle = crossColor; ctx.fill()
-
-      // Hold progress ring — fills as you hold on uncaptured zone
-      if (holdProg.current > 0 && !isCurrentCaptured) {
-        ctx.beginPath()
-        ctx.arc(cx, cy, 36, -Math.PI/2, -Math.PI/2 + holdProg.current * Math.PI * 2)
-        ctx.strokeStyle = '#32dc64'
-        ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.stroke()
-      }
-
-      // ── Check auto-capture conditions ─────────────────────────────
-      const cellIdx = getGridCell(currentYaw, currentPitch).idx
-      const isCaptured = grid.current[cellIdx]
-
-      if (!isCaptured && !capturing.current) {
-        if (!isHolding.current) {
-          isHolding.current = true
-          holdStart.current = Date.now()
-          holdProg.current  = 0
-        } else {
-          holdProg.current = Math.min(1, (Date.now() - holdStart.current) / AUTO_CAP_MS)
-          if (holdProg.current >= 1) {
-            doCapture()
-          }
-        }
-      } else {
-        isHolding.current = false
-        holdProg.current  = 0
-      }
-
-      // ── Update coverage display ───────────────────────────────────
-      const pct = getCoverage()
-      setCoveragePct(pct)
-    }
-    draw()
-  }
-
-  // ── Capture current view ──────────────────────────────────────────
-  function doCapture() {
-    if (capturing.current) return
-    capturing.current = true
-    isHolding.current = false
-    holdProg.current  = 0
-
-    setFlash(true)
-    setTimeout(() => setFlash(false), 100)
-
-    const vid = videoRef.current
-    const cv  = captureRef.current
-    if (!vid || !cv) { capturing.current = false; return }
-
-    const vw = vid.videoWidth || 1920
-    const vh = vid.videoHeight || 1080
-    cv.width = vw; cv.height = vh
-    cv.getContext('2d').drawImage(vid, 0, 0)
-
-    // Mark this FOV as captured in grid
-    markCurrentFOV(phoneYaw.current, phonePitch.current)
-
-    // Crop to square → 512×512 face
-    const faceCanvas = faceRef.current
-    const minDim = Math.min(vw, vh)
-    const srcX   = (vw - minDim) / 2
-    const srcY   = (vh - minDim) / 2
-    faceCanvas.width  = FACE_SIZE
-    faceCanvas.height = FACE_SIZE
-    faceCanvas.getContext('2d').drawImage(cv, srcX, srcY, minDim, minDim, 0, 0, FACE_SIZE, FACE_SIZE)
-
-    faceCanvas.toBlob(blob => {
-      const captureEntry = {
-        blob,
-        yaw:   phoneYaw.current,
-        pitch: phonePitch.current,
-        url:   URL.createObjectURL(blob),
-      }
-      currentCaptures.current = [...currentCaptures.current, captureEntry]
-      lastCaptures.current    = [...currentCaptures.current]
-      setCaptureCount(currentCaptures.current.length)
-      capturing.current = false
-    }, 'image/jpeg', 0.92)
-  }
-
-  // ── Undo last capture ─────────────────────────────────────────────
-  function undoCapture() {
-    if (currentCaptures.current.length === 0) return
-    // Remove last capture
-    currentCaptures.current = currentCaptures.current.slice(0, -1)
-    setCaptureCount(currentCaptures.current.length)
-    // Rebuild grid from remaining captures
-    grid.current = Array(GRID_H * GRID_V).fill(false)
-    currentCaptures.current.forEach(c => markCurrentFOV(c.yaw, c.pitch))
-  }
-
-  // ── Start camera + AR loop ────────────────────────────────────────
-  async function startCapture() {
-    // Reset
-    currentCaptures.current = []
-    lastCaptures.current    = []
-    grid.current            = Array(GRID_H * GRID_V).fill(false)
-    calibrated.current      = false
-    phoneYaw.current        = 0
-    phonePitch.current      = 0
-    setCaptureCount(0)
-    setCoveragePct(0)
-    currentSweepId.current  = generateSweepId()
-
-    // Gyro
-    if (typeof DeviceOrientationEvent !== 'undefined') {
-      if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-        try {
-          const p = await DeviceOrientationEvent.requestPermission()
-          if (p === 'granted') {
-            window.addEventListener('deviceorientation', onGyro, true)
-            window.addEventListener('deviceorientationabsolute', onGyro, true)
-            setGyroActive(true)
-          } else { setGyroActive(false) }
-        } catch(e) { setGyroActive(false) }
-      } else {
-        window.addEventListener('deviceorientation', onGyro, true)
-        window.addEventListener('deviceorientationabsolute', onGyro, true)
-        setGyroActive(true)
-      }
-    }
-
-    setScreen('capture')
-    await new Promise(r => setTimeout(r, 80))
-
+  // ─── Request iOS gyro permission (MUST be direct button click) ───
+  const requestGyroPermission = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 } },
-        audio: false
-      })
-      streamRef.current = stream
-      videoRef.current.srcObject = stream
-      await videoRef.current.play()
-    } catch(e) {
-      stopCamera(); setScreen('position_start')
-      alert('Camera blocked. Allow camera and try again.')
+      // iOS 13+ requires explicit permission
+      if (typeof DeviceOrientationEvent !== 'undefined' && 
+          typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const permission = await DeviceOrientationEvent.requestPermission()
+        if (permission === 'granted') {
+          setGyroStatus('granted')
+          return true
+        } else {
+          setGyroStatus('denied')
+          setDebugInfo('Permission denied. Go to Settings > Safari > Motion & Orientation > Allow')
+          return false
+        }
+      } else {
+        // Android or older iOS - no permission needed
+        setGyroStatus('granted')
+        return true
+      }
+    } catch (err) {
+      console.error('Gyro permission error:', err)
+      setGyroStatus('unavailable')
+      setDebugInfo('Gyro not available: ' + err.message)
+      return false
+    }
+  }
+
+  // ─── Start camera + gyro (called from direct button click) ───
+  const startCapture = async () => {
+    if (!roomName.trim()) {
+      alert('Enter room name first')
       return
     }
 
-    await new Promise(resolve => {
-      const check = () => videoRef.current?.videoWidth > 0 ? resolve() : setTimeout(check, 100)
-      check(); setTimeout(resolve, 3000)
+    // Step 1: Request gyro permission FIRST (must be in same user gesture)
+    const gyroOk = await requestGyroPermission()
+    if (!gyroOk) {
+      // Still continue - fallback to manual mode
+      console.log('Gyro not available, using manual mode')
+    }
+
+    // Step 2: Start camera
+    try {
+      const constraints = {
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        },
+        audio: false
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints)
+      streamRef.current = stream
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+        await videoRef.current.play()
+      }
+
+      // Step 3: Initialize targets
+      const targets = generateTargets()
+      targetQueueRef.current = targets
+      shotsRef.current = []
+      coverageMapRef.current = new Set()
+
+      // Set first target
+      if (targets.length > 0) {
+        currentTargetRef.current = targets[0]
+        setCurrentTarget(targets[0])
+      }
+
+      // Step 4: Start gyro listener
+      if (gyroOk) {
+        window.addEventListener('deviceorientation', handleOrientation, true)
+      }
+
+      // Step 5: Start render loop
+      requestAnimationFrame(renderLoop)
+
+      setScreen('capture')
+      setCapturing(true)
+      setCapturedCount(0)
+      setCoveragePct(0)
+
+    } catch (err) {
+      console.error('Camera error:', err)
+      alert('Camera access denied. Please allow camera access in Settings > Safari > Camera')
+    }
+  }
+
+  // ─── Gyro handler ───
+  const handleOrientation = (event) => {
+    const { alpha, beta, gamma, absolute } = event
+
+    // Store raw values
+    gyroRef.current = { alpha, beta, gamma, absolute }
+
+    // Calibrate base orientation on first reading
+    if (!baseOrientationRef.current && alpha !== null && beta !== null) {
+      baseOrientationRef.current = { alpha, beta }
+    }
+
+    // Calculate relative orientation
+    if (baseOrientationRef.current && alpha !== null && beta !== null) {
+      let yaw = alpha - baseOrientationRef.current.alpha
+      let pitch = beta - baseOrientationRef.current.beta
+
+      // Normalize
+      yaw = ((yaw % 360) + 360) % 360
+      pitch = Math.max(-90, Math.min(90, pitch))
+
+      // Smooth with exponential moving average
+      smoothOrientationRef.current.yaw = 
+        smoothOrientationRef.current.yaw * 0.7 + yaw * 0.3
+      smoothOrientationRef.current.pitch = 
+        smoothOrientationRef.current.pitch * 0.7 + pitch * 0.3
+    }
+  }
+
+  // ─── Render loop (60fps) ───
+  const renderLoop = useCallback(() => {
+    if (!capturing) return
+
+    const current = currentTargetRef.current
+    const smooth = smoothOrientationRef.current
+
+    // Calculate distance to target
+    let yawDiff = current.yaw - smooth.yaw
+    // Handle wrap-around (e.g., 350° vs 10°)
+    if (yawDiff > 180) yawDiff -= 360
+    if (yawDiff < -180) yawDiff += 360
+
+    const pitchDiff = current.pitch - smooth.pitch
+    const distance = Math.sqrt(yawDiff * yawDiff + pitchDiff * pitchDiff)
+
+    // Lock threshold: within 15 degrees
+    const locked = distance < 15
+    setIsLocked(locked)
+
+    // Auto-capture when locked for 0.8s
+    if (locked && !isProcessingRef.current) {
+      if (!lockTimerRef.current) {
+        lockTimerRef.current = setTimeout(() => {
+          captureFrame()
+        }, 800)
+      }
+    } else if (!locked && lockTimerRef.current) {
+      clearTimeout(lockTimerRef.current)
+      lockTimerRef.current = null
+    }
+
+    // Update debug
+    setDebugInfo(`Target: ${current.yaw.toFixed(0)}°,${current.pitch.toFixed(0)}° | ` +
+                 `Current: ${smooth.yaw.toFixed(0)}°,${smooth.pitch.toFixed(0)}° | ` +
+                 `Dist: ${distance.toFixed(1)}° | ${locked ? 'LOCKED' : 'aiming...'}`)
+
+    requestAnimationFrame(renderLoop)
+  }, [capturing])
+
+  // ─── Capture frame ───
+  const captureFrame = async () => {
+    if (isProcessingRef.current) return
+    isProcessingRef.current = true
+
+    // Clear lock timer
+    if (lockTimerRef.current) {
+      clearTimeout(lockTimerRef.current)
+      lockTimerRef.current = null
+    }
+
+    const video = videoRef.current
+    const canvas = canvasRef.current
+    if (!video || !canvas) return
+
+    // Flash effect
+    setFlash(true)
+    setTimeout(() => setFlash(false), 150)
+
+    // Draw to canvas
+    canvas.width = video.videoWidth || 1920
+    canvas.height = video.videoHeight || 1080
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+
+    // Get image data
+    const blob = await new Promise(resolve => {
+      canvas.toBlob(resolve, 'image/jpeg', 0.92)
     })
 
-    if (overlayRef.current) {
-      overlayRef.current.width  = window.innerWidth
-      overlayRef.current.height = window.innerHeight
+    const shot = {
+      id: Date.now(),
+      yaw: currentTargetRef.current.yaw,
+      pitch: currentTargetRef.current.pitch,
+      blob: blob,
+      timestamp: new Date().toISOString()
     }
 
-    startARLoop()
-  }
+    shotsRef.current.push(shot)
 
-  // ── Finish this position ──────────────────────────────────────────
-  function finishPosition() {
-    stopCamera()
-    if (currentCaptures.current.length === 0) return
+    // Mark coverage
+    const key = `${Math.round(shot.yaw)},${Math.round(shot.pitch)}`
+    coverageMapRef.current.add(key)
 
-    // Save sweep with all captures
-    sweepsRef.current = [...sweepsRef.current, {
-      id:       currentSweepId.current,
-      captures: [...currentCaptures.current],
-      coverage: getCoverage(),
-      positionIdx,
-    }]
+    // Create thumbnail
+    const thumbCanvas = document.createElement('canvas')
+    thumbCanvas.width = 120
+    thumbCanvas.height = 90
+    const thumbCtx = thumbCanvas.getContext('2d')
+    thumbCtx.drawImage(video, 0, 0, 120, 90)
+    const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.5)
 
-    // Add front-view thumbnail
-    if (currentCaptures.current[0]?.url) {
-      setThumbUrls(prev => [...prev, currentCaptures.current[0].url])
+    setThumbnails(prev => [...prev, { id: shot.id, url: thumbUrl }])
+    setCapturedCount(shotsRef.current.length)
+    setShowUndo(true)
+
+    // Update coverage percentage
+    const coverage = Math.min(100, Math.round((shotsRef.current.length / totalNeeded) * 100))
+    setCoveragePct(coverage)
+
+    // Move to next target
+    const queue = targetQueueRef.current
+    const currentIdx = queue.findIndex(t => 
+      Math.abs(t.yaw - currentTargetRef.current.yaw) < 1 && 
+      Math.abs(t.pitch - currentTargetRef.current.pitch) < 1
+    )
+
+    if (currentIdx >= 0) {
+      queue[currentIdx].captured = true
     }
 
-    setScreen('position_done')
+    // Find next uncaptured target
+    const nextTarget = queue.find(t => !t.captured)
+    if (nextTarget) {
+      currentTargetRef.current = nextTarget
+      setCurrentTarget(nextTarget)
+    } else {
+      // All captured!
+      finishCapture()
+      return
+    }
+
+    isProcessingRef.current = false
   }
 
-  // ── Download ZIP in Matterport cubemap format ─────────────────────
-  async function downloadRoomZip() {
-    setZipping(true)
-    try {
-      const JSZip    = (await import('jszip')).default
-      const zip      = new JSZip()
-      const safeName = roomName.replace(/\s+/g, '_')
-      const sweepDir = zip.folder('SweepProcessorData')
+  // ─── Manual capture button ───
+  const manualCapture = () => {
+    if (lockTimerRef.current) {
+      clearTimeout(lockTimerRef.current)
+      lockTimerRef.current = null
+    }
+    captureFrame()
+  }
 
-      // Build meta with all sweeps and their captures
-      const meta = {
-        room:       roomName,
-        app:        'PropView360',
-        version:    '1.0',
-        format:     'matterport_cubemap',
-        sweepCount: sweepsRef.current.length,
-        sweeps: sweepsRef.current.map((sweep, i) => ({
-          id:          sweep.id,
-          positionIdx: i,
-          coverage:    sweep.coverage,
-          captureCount: sweep.captures.length,
-          captures:    sweep.captures.map((c, ci) => ({
-            file:  `${sweep.id.toLowerCase()}_cap${ci.toString().padStart(3,'0')}.jpg`,
-            yaw:   Math.round(c.yaw),
-            pitch: Math.round(c.pitch),
-          })),
-          linkedSweeps: sweepsRef.current
-            .filter((_, j) => Math.abs(i - j) === 1)
-            .map(s => s.id),
-        }))
+  // ─── Undo last shot ───
+  const undoLast = () => {
+    if (shotsRef.current.length === 0) return
+
+    const removed = shotsRef.current.pop()
+    const key = `${Math.round(removed.yaw)},${Math.round(removed.pitch)}`
+    coverageMapRef.current.delete(key)
+
+    // Put target back in queue
+    const queue = targetQueueRef.current
+    const target = queue.find(t => 
+      Math.abs(t.yaw - removed.yaw) < 1 && 
+      Math.abs(t.pitch - removed.pitch) < 1
+    )
+    if (target) target.captured = false
+
+    setThumbnails(prev => prev.slice(0, -1))
+    setCapturedCount(shotsRef.current.length)
+    setCoveragePct(Math.round((shotsRef.current.length / totalNeeded) * 100))
+
+    // Go back to that target
+    currentTargetRef.current = { yaw: removed.yaw, pitch: removed.pitch }
+    setCurrentTarget({ yaw: removed.yaw, pitch: removed.pitch })
+
+    if (shotsRef.current.length === 0) setShowUndo(false)
+  }
+
+  // ─── Finish capture ───
+  const finishCapture = () => {
+    setCapturing(false)
+    window.removeEventListener('deviceorientation', handleOrientation, true)
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop())
+    }
+
+    setScreen('review')
+  }
+
+  // ─── Download ZIP ───
+  const downloadZip = async () => {
+    const zip = new JSZip()
+    const folderName = `${roomName.replace(/\s+/g, '_')}_${positionLabel.replace(/\s+/g, '_')}`
+    const folder = zip.folder(folderName)
+
+    // Add metadata
+    const meta = {
+      room: roomName,
+      position: positionLabel,
+      capturedAt: new Date().toISOString(),
+      shotCount: shotsRef.current.length,
+      shots: shotsRef.current.map((s, i) => ({
+        filename: `shot_${String(i+1).padStart(3, '0')}.jpg`,
+        yaw: s.yaw,
+        pitch: s.pitch,
+        timestamp: s.timestamp
+      }))
+    }
+    folder.file('meta.json', JSON.stringify(meta, null, 2))
+
+    // Add images
+    shotsRef.current.forEach((shot, i) => {
+      const filename = `shot_${String(i+1).padStart(3, '0')}.jpg`
+      folder.file(filename, shot.blob)
+    })
+
+    const content = await zip.generateAsync({ type: 'blob' })
+    const url = URL.createObjectURL(content)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${folderName}.zip`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  // ─── Reset for next position ───
+  const nextPosition = () => {
+    const nextNum = parseInt(positionLabel.replace(/\D/g, '')) + 1
+    setPositionLabel(`Position ${nextNum}`)
+    setScreen('start')
+    setThumbnails([])
+    setCapturedCount(0)
+    setCoveragePct(0)
+    setShowUndo(false)
+    shotsRef.current = []
+    coverageMapRef.current = new Set()
+    baseOrientationRef.current = null
+    smoothOrientationRef.current = { yaw: 0, pitch: 0 }
+  }
+
+  // ─── Cleanup ───
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop())
       }
+      window.removeEventListener('deviceorientation', handleOrientation, true)
+      if (lockTimerRef.current) clearTimeout(lockTimerRef.current)
+    }
+  }, [])
 
-      sweepDir.file('meta.json', JSON.stringify(meta, null, 2))
+  // ─── Calculate target dot position on screen ───
+  const getTargetPosition = () => {
+    const smooth = smoothOrientationRef.current
+    const target = currentTargetRef.current
 
-      // Add all capture images for each sweep
-      for (const sweep of sweepsRef.current) {
-        const sweepIdLower = sweep.id.toLowerCase()
+    // Calculate relative angles
+    let yawDiff = target.yaw - smooth.yaw
+    if (yawDiff > 180) yawDiff -= 360
+    if (yawDiff < -180) yawDiff += 360
 
-        // Generate thumbnail from first capture
-        if (sweep.captures[0]?.blob) {
-          const tbuf = await sweep.captures[0].blob.arrayBuffer()
-          sweepDir.file(`${sweepIdLower}_thumbnail.jpg`, tbuf)
-        }
+    const pitchDiff = target.pitch - smooth.pitch
 
-        // All captures with yaw/pitch baked into filename
-        for (let ci = 0; ci < sweep.captures.length; ci++) {
-          const cap = sweep.captures[ci]
-          if (!cap.blob) continue
-          const buf = await cap.blob.arrayBuffer()
-          sweepDir.file(`${sweepIdLower}_cap${ci.toString().padStart(3,'0')}.jpg`, buf)
-        }
-      }
+    // Convert to screen coordinates (center is 0,0)
+    // FOV = ~60 degrees, screen width = 360 degrees mapped
+    const screenX = (yawDiff / 60) * 50  // % from center
+    const screenY = (pitchDiff / 60) * 50  // % from center
 
-      const blob = await zip.generateAsync({
-        type:'blob', compression:'DEFLATE', compressionOptions:{ level: 3 }
-      })
-      const url = URL.createObjectURL(blob)
-      const a   = document.createElement('a')
-      a.href = url
-      a.download = `${safeName}.zip`
-      a.click()
-      URL.revokeObjectURL(url)
-
-      setCompletedRooms(prev => [...prev, {
-        name:    roomName,
-        sweeps:  sweepsRef.current.length,
-        captures: sweepsRef.current.reduce((s, sw) => s + sw.captures.length, 0),
-      }])
-    } catch(e) { alert('ZIP failed: ' + e.message) }
-
-    // Reset for next room
-    sweepsRef.current   = []
-    setThumbUrls([])
-    setPositionIdx(0)
-    setCustomRoom('')
-    setZipping(false)
-    setScreen('home')
+    return {
+      left: `calc(50% + ${Math.max(-45, Math.min(45, screenX))}%)`,
+      top: `calc(50% + ${Math.max(-45, Math.min(45, screenY))}%)`,
+      visible: Math.abs(yawDiff) < 60 && Math.abs(pitchDiff) < 60
+    }
   }
 
-  function startRoom(name) {
-    sweepsRef.current = []; setThumbUrls([]); setPositionIdx(0)
-    setRoomName(name); setScreen('position_start')
-  }
+  const targetPos = getTargetPosition()
 
-  // ══════════════════════════════════════════════════════════════════
-  // SCREENS
-  // ══════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════
+  // RENDER
+  // ═══════════════════════════════════════════════════════════
+  return (
+    <div style={{ 
+      width: '100vw', 
+      height: '100vh', 
+      background: '#000', 
+      overflow: 'hidden',
+      position: 'fixed',
+      top: 0,
+      left: 0
+    }}>
+      <Head>
+        <title>PropView360 - Scan</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+      </Head>
 
-  // ── HOME ─────────────────────────────────────────────────────────
-  if (screen === 'home') return (
-    <div style={s.page}>
-      <Head><title>PropView360 — Scan</title>
-        <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"/></Head>
-      <div style={s.inner}>
-        <div style={{fontSize:52}}>🏠</div>
-        <h1 style={s.h1}>PropView360</h1>
-        <p style={s.sub}>Scan each room. Download ZIP. Send to PC for full 360° tour.</p>
+      {/* Hidden canvas for capture */}
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-        {completedRooms.length > 0 && (
-          <div style={s.doneBox}>
-            <div style={{fontSize:12,color:'#32dc64',fontWeight:700,marginBottom:8}}>SCANNED ROOMS</div>
-            {completedRooms.map((r,i) => (
-              <div key={i} style={{display:'flex',alignItems:'center',gap:10,
-                padding:'8px 0',borderTop:'1px solid rgba(255,255,255,0.05)'}}>
-                <span style={{fontSize:20}}>📦</span>
-                <div style={{flex:1}}>
-                  <div style={{fontSize:14,fontWeight:500}}>{r.name}</div>
-                  <div style={{fontSize:12,color:'#666',marginTop:2}}>
-                    {r.sweeps} position{r.sweeps!==1?'s':''} · {r.captures} captures
-                  </div>
-                </div>
-                <span style={{fontSize:12,color:'#32dc64'}}>✓</span>
-              </div>
-            ))}
+      {/* ═══ START SCREEN ═══ */}
+      {screen === 'start' && (
+        <div style={{
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '20px',
+          background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)',
+          color: '#fff'
+        }}>
+          <h1 style={{ fontSize: '28px', marginBottom: '8px', textAlign: 'center' }}>
+            🏠 PropView360
+          </h1>
+          <p style={{ fontSize: '14px', color: '#aaa', marginBottom: '30px', textAlign: 'center' }}>
+            Capture 360° panoramas for virtual tours
+          </p>
+
+          <div style={{ width: '100%', maxWidth: '320px' }}>
+            <label style={{ fontSize: '12px', color: '#888', display: 'block', marginBottom: '6px' }}>
+              Room Name
+            </label>
+            <input
+              type="text"
+              value={roomName}
+              onChange={e => setRoomName(e.target.value)}
+              placeholder="e.g. Living Room"
+              style={{
+                width: '100%',
+                padding: '14px 16px',
+                borderRadius: '12px',
+                border: '1px solid #333',
+                background: '#0a0a1a',
+                color: '#fff',
+                fontSize: '16px',
+                marginBottom: '16px',
+                outline: 'none'
+              }}
+            />
+
+            <label style={{ fontSize: '12px', color: '#888', display: 'block', marginBottom: '6px' }}>
+              Position Label
+            </label>
+            <input
+              type="text"
+              value={positionLabel}
+              onChange={e => setPositionLabel(e.target.value)}
+              placeholder="e.g. Position 1"
+              style={{
+                width: '100%',
+                padding: '14px 16px',
+                borderRadius: '12px',
+                border: '1px solid #333',
+                background: '#0a0a1a',
+                color: '#fff',
+                fontSize: '16px',
+                marginBottom: '24px',
+                outline: 'none'
+              }}
+            />
           </div>
-        )}
 
-        <button style={s.btn} onClick={() => setScreen('room_name')}>
-          + Scan {completedRooms.length > 0 ? 'Another ' : 'a '}Room
-        </button>
+          <div style={{
+            background: 'rgba(255,255,255,0.05)',
+            borderRadius: '12px',
+            padding: '16px',
+            marginBottom: '24px',
+            maxWidth: '320px',
+            width: '100%'
+          }}>
+            <p style={{ fontSize: '13px', color: '#ccc', lineHeight: '1.6', margin: 0 }}>
+              📱 <strong>How it works:</strong><br/>
+              1. Stand in the <strong>center</strong> of the room<br/>
+              2. Point camera at the <strong>white dot</strong><br/>
+              3. Hold steady — auto captures when aligned<br/>
+              4. Rotate to next dot until complete<br/>
+              5. Download ZIP and send to PC for stitching
+            </p>
+          </div>
 
-        {completedRooms.length > 0 && (
-          <div style={s.infoBox}>
-            <div style={{fontWeight:600,color:'#fff',marginBottom:6,fontSize:14}}>📲 Next Steps</div>
-            <div style={{fontSize:13,color:'#999',lineHeight:1.85}}>
-              1. Send ZIP to PC via WhatsApp / USB<br/>
-              2. Open PropView360 desktop app<br/>
-              3. Drop ZIP → Click "Create Tour"<br/>
-              4. Share the link with buyers
+          <button
+            onClick={startCapture}
+            style={{
+              width: '100%',
+              maxWidth: '320px',
+              padding: '16px',
+              borderRadius: '14px',
+              border: 'none',
+              background: '#4CAF50',
+              color: '#fff',
+              fontSize: '18px',
+              fontWeight: '600',
+              cursor: 'pointer',
+              boxShadow: '0 4px 20px rgba(76,175,80,0.3)'
+            }}
+          >
+            📷 Start Scanning
+          </button>
+
+          {gyroStatus === 'denied' && (
+            <p style={{ fontSize: '12px', color: '#ff6b6b', marginTop: '12px', textAlign: 'center' }}>
+              ⚠️ Gyro permission denied. Using manual mode.<br/>
+              Tap the button to capture each shot.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* ═══ CAPTURE SCREEN ═══ */}
+      {screen === 'capture' && (
+        <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+          {/* Camera feed */}
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              position: 'absolute',
+              top: 0,
+              left: 0
+            }}
+          />
+
+          {/* Coverage overlay (semi-transparent black for uncaptured areas) */}
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            pointerEvents: 'none',
+            background: `radial-gradient(circle at 50% 50%, transparent 30%, rgba(0,0,0,${0.7 - (coveragePct/100)*0.7}) 70%)`,
+            transition: 'background 0.3s ease'
+          }} />
+
+          {/* Top bar */}
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            padding: '12px 16px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            background: 'linear-gradient(to bottom, rgba(0,0,0,0.7), transparent)',
+            zIndex: 10
+          }}>
+            <div>
+              <span style={{ fontSize: '13px', color: '#fff', fontWeight: '600' }}>
+                {roomName}
+              </span>
+              <span style={{ fontSize: '12px', color: '#aaa', marginLeft: '8px' }}>
+                {positionLabel}
+              </span>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <span style={{ fontSize: '18px', color: '#4CAF50', fontWeight: '700' }}>
+                {capturedCount}/{totalNeeded}
+              </span>
+              <span style={{ fontSize: '11px', color: '#aaa', display: 'block' }}>
+                {coveragePct}% coverage
+              </span>
             </div>
           </div>
-        )}
-      </div>
-    </div>
-  )
 
-  // ── ROOM NAME ────────────────────────────────────────────────────
-  if (screen === 'room_name') return (
-    <div style={s.page}>
-      <Head><title>Name This Room</title>
-        <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"/></Head>
-      <div style={s.inner}>
-        <div style={{fontSize:48}}>🚪</div>
-        <h1 style={s.h1}>Which Room?</h1>
-        <p style={s.sub}>Select a preset or type a name.</p>
-        <div style={{display:'flex',flexWrap:'wrap',gap:8,width:'100%',maxWidth:340,justifyContent:'center'}}>
-          {ROOM_PRESETS.map(r => (
-            <button key={r} onClick={() => setCustomRoom(r)} style={{
-              padding:'8px 14px',borderRadius:20,fontSize:13,cursor:'pointer',
-              border:`1px solid ${customRoom===r?'#6496ff':'rgba(255,255,255,0.1)'}`,
-              background:customRoom===r?'rgba(100,150,255,0.2)':'rgba(255,255,255,0.04)',
-              color:customRoom===r?'#6496ff':'#ccc',
-            }}>{r}</button>
-          ))}
-        </div>
-        <div style={{width:'100%',maxWidth:340}}>
-          <label style={s.label}>Custom name:</label>
-          <input style={s.input} placeholder="e.g. Guest Room"
-            value={customRoom} onChange={e => setCustomRoom(e.target.value)}/>
-        </div>
-        <div style={{display:'flex',gap:10,width:'100%',maxWidth:340}}>
-          <button style={{...s.btn,flex:1,background:'transparent',
-            border:'1px solid rgba(255,255,255,0.15)',color:'#888'}}
-            onClick={() => setScreen('home')}>Back</button>
-          <button style={{...s.btn,flex:2,opacity:customRoom.trim()?1:0.4}}
-            disabled={!customRoom.trim()} onClick={() => startRoom(customRoom.trim())}>
-            Next →
-          </button>
-        </div>
-      </div>
-    </div>
-  )
+          {/* Progress bar */}
+          <div style={{
+            position: 'absolute',
+            top: '50px',
+            left: '16px',
+            right: '16px',
+            height: '4px',
+            background: 'rgba(255,255,255,0.2)',
+            borderRadius: '2px',
+            overflow: 'hidden',
+            zIndex: 10
+          }}>
+            <div style={{
+              width: `${coveragePct}%`,
+              height: '100%',
+              background: '#4CAF50',
+              borderRadius: '2px',
+              transition: 'width 0.3s ease'
+            }} />
+          </div>
 
-  // ── POSITION START ────────────────────────────────────────────────
-  if (screen === 'position_start') return (
-    <div style={s.page}>
-      <Head><title>Position {positionIdx+1}</title>
-        <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"/></Head>
-      <div style={s.inner}>
-        <div style={{fontSize:52}}>📍</div>
-        <h1 style={s.h1}>{roomName}</h1>
-        <h2 style={{fontSize:18,fontWeight:600,color:'#888',margin:0}}>
-          Position {positionIdx+1}
-        </h2>
-        <div style={{...s.infoBox,maxWidth:340}}>
-          <strong style={{color:'#fff',display:'block',marginBottom:6}}>
-            {positionIdx === 0 ? 'Stand in the CENTER of the room' : 'Move to a new spot'}
-          </strong>
-          <div style={{fontSize:13,color:'#999',lineHeight:1.75}}>
-            • Slowly rotate your phone in all directions<br/>
-            • Black areas = not yet captured<br/>
-            • Camera auto-captures as you sweep<br/>
-            • Cover all black areas for a complete scan
+          {/* Center crosshair */}
+          <div style={{
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: '40px',
+            height: '40px',
+            zIndex: 10,
+            pointerEvents: 'none'
+          }}>
+            <div style={{
+              position: 'absolute',
+              top: '50%',
+              left: 0,
+              right: 0,
+              height: '2px',
+              background: 'rgba(255,255,255,0.8)'
+            }} />
+            <div style={{
+              position: 'absolute',
+              left: '50%',
+              top: 0,
+              bottom: 0,
+              width: '2px',
+              background: 'rgba(255,255,255,0.8)'
+            }} />
+            <div style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              width: '6px',
+              height: '6px',
+              borderRadius: '50%',
+              background: '#fff'
+            }} />
+          </div>
+
+          {/* Target dot */}
+          {targetPos.visible && (
+            <div style={{
+              position: 'absolute',
+              left: targetPos.left,
+              top: targetPos.top,
+              transform: 'translate(-50%, -50%)',
+              width: isLocked ? '60px' : '50px',
+              height: isLocked ? '60px' : '50px',
+              borderRadius: '50%',
+              border: `3px solid ${isLocked ? '#4CAF50' : '#fff'}`,
+              background: isLocked ? 'rgba(76,175,80,0.2)' : 'rgba(255,255,255,0.1)',
+              boxShadow: isLocked 
+                ? '0 0 20px rgba(76,175,80,0.6), inset 0 0 20px rgba(76,175,80,0.2)' 
+                : '0 0 15px rgba(255,255,255,0.3)',
+              transition: 'all 0.2s ease',
+              zIndex: 10,
+              pointerEvents: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}>
+              <div style={{
+                width: '12px',
+                height: '12px',
+                borderRadius: '50%',
+                background: isLocked ? '#4CAF50' : '#fff'
+              }} />
+            </div>
+          )}
+
+          {/* Direction arrow when target is off-screen */}
+          {!targetPos.visible && (
+            <div style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              zIndex: 10,
+              pointerEvents: 'none'
+            }}>
+              <div style={{
+                fontSize: '40px',
+                color: '#fff',
+                textShadow: '0 0 10px rgba(0,0,0,0.5)',
+                animation: 'pulse 1s infinite'
+              }}>
+                ↻
+              </div>
+              <p style={{ fontSize: '12px', color: '#fff', textAlign: 'center', marginTop: '8px' }}>
+                Rotate phone to find target
+              </p>
+            </div>
+          )}
+
+          {/* Lock indicator */}
+          {isLocked && (
+            <div style={{
+              position: 'absolute',
+              top: '28%',
+              left: '50%',
+              transform: 'translateX(-50%)',
+              background: 'rgba(76,175,80,0.9)',
+              color: '#fff',
+              padding: '6px 16px',
+              borderRadius: '20px',
+              fontSize: '13px',
+              fontWeight: '600',
+              zIndex: 10,
+              pointerEvents: 'none',
+              animation: 'fadeIn 0.3s ease'
+            }}>
+              ✓ Hold steady...
+            </div>
+          )}
+
+          {/* Flash effect */}
+          {flash && (
+            <div style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              background: '#fff',
+              opacity: 0.6,
+              zIndex: 20,
+              pointerEvents: 'none',
+              transition: 'opacity 0.15s ease'
+            }} />
+          )}
+
+          {/* Bottom controls */}
+          <div style={{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            padding: '16px',
+            background: 'linear-gradient(to top, rgba(0,0,0,0.8), transparent)',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-end',
+            zIndex: 10
+          }}>
+            {/* Undo button */}
+            {showUndo && (
+              <button
+                onClick={undoLast}
+                style={{
+                  padding: '10px 16px',
+                  borderRadius: '10px',
+                  border: '1px solid rgba(255,255,255,0.3)',
+                  background: 'rgba(0,0,0,0.5)',
+                  color: '#fff',
+                  fontSize: '13px',
+                  cursor: 'pointer'
+                }}
+              >
+                ↩ Undo
+              </button>
+            )}
+            {!showUndo && <div />}
+
+            {/* Manual capture button */}
+            <button
+              onClick={manualCapture}
+              style={{
+                width: '70px',
+                height: '70px',
+                borderRadius: '50%',
+                border: '3px solid #fff',
+                background: isLocked ? 'rgba(76,175,80,0.8)' : 'rgba(255,255,255,0.2)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}
+            >
+              <div style={{
+                width: '54px',
+                height: '54px',
+                borderRadius: '50%',
+                background: isLocked ? '#4CAF50' : '#fff'
+              }} />
+            </button>
+
+            {/* Done button */}
+            <button
+              onClick={finishCapture}
+              style={{
+                padding: '10px 16px',
+                borderRadius: '10px',
+                border: '1px solid rgba(255,255,255,0.3)',
+                background: 'rgba(0,0,0,0.5)',
+                color: '#fff',
+                fontSize: '13px',
+                cursor: 'pointer'
+              }}
+            >
+              ✓ Done
+            </button>
+          </div>
+
+          {/* Thumbnail strip */}
+          {thumbnails.length > 0 && (
+            <div style={{
+              position: 'absolute',
+              bottom: '100px',
+              left: '16px',
+              right: '16px',
+              display: 'flex',
+              gap: '8px',
+              overflowX: 'auto',
+              zIndex: 10,
+              paddingBottom: '8px'
+            }}>
+              {thumbnails.map((t, i) => (
+                <div key={t.id} style={{
+                  flexShrink: 0,
+                  width: '80px',
+                  height: '60px',
+                  borderRadius: '8px',
+                  overflow: 'hidden',
+                  border: '2px solid rgba(255,255,255,0.3)'
+                }}>
+                  <img src={t.url} alt={`Shot ${i+1}`} style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover'
+                  }} />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Debug info (tap to toggle) */}
+          <div 
+            onClick={() => setDebugInfo('')}
+            style={{
+              position: 'absolute',
+              top: '80px',
+              left: '16px',
+              right: '16px',
+              zIndex: 10
+            }}
+          >
+            {debugInfo && (
+              <p style={{
+                fontSize: '10px',
+                color: 'rgba(255,255,255,0.6)',
+                background: 'rgba(0,0,0,0.5)',
+                padding: '4px 8px',
+                borderRadius: '4px',
+                margin: 0,
+                fontFamily: 'monospace'
+              }}>
+                {debugInfo}
+              </p>
+            )}
           </div>
         </div>
-
-        {sweepsRef.current.length > 0 && (
-          <div style={{fontSize:13,color:'#666'}}>
-            {sweepsRef.current.length} position{sweepsRef.current.length!==1?'s':''} scanned so far
-          </div>
-        )}
-
-        <button style={s.btn} onClick={startCapture}>
-          📸 Start Scanning Position {positionIdx+1}
-        </button>
-
-        {sweepsRef.current.length > 0 && (
-          <button style={{...s.btn,background:'rgba(50,220,100,0.12)',
-            border:'1px solid rgba(50,220,100,0.3)',color:'#32dc64'}}
-            onClick={() => setScreen('room_done')}>
-            ✅ Finish Room & Download
-          </button>
-        )}
-
-        <button style={{...s.btn,background:'transparent',
-          border:'1px solid rgba(255,255,255,0.12)',color:'#666'}}
-          onClick={() => setScreen('home')}>← Back</button>
-
-        <p style={{fontSize:12,color:'#555'}}>2-4 positions per room recommended</p>
-      </div>
-    </div>
-  )
-
-  // ── CAPTURE — Matterport-style ────────────────────────────────────
-  if (screen === 'capture') return (
-    <div style={{position:'fixed',inset:0,background:'#000',overflow:'hidden',touchAction:'none'}}>
-      <Head><title>Scanning {roomName}</title>
-        <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"/></Head>
-
-      {/* Live camera feed */}
-      <video ref={videoRef} autoPlay playsInline muted
-        style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover',zIndex:1}}/>
-
-      {/* Hidden canvases */}
-      <canvas ref={captureRef} style={{display:'none'}}/>
-      <canvas ref={faceRef}    style={{display:'none'}}/>
-      <canvas ref={thumbRef}   style={{display:'none'}}/>
-
-      {/* Coverage overlay — black mask over uncaptured zones */}
-      <canvas ref={overlayRef}
-        style={{position:'absolute',inset:0,width:'100%',height:'100%',
-          zIndex:10,pointerEvents:'none'}}/>
-
-      {/* Flash */}
-      {flash && (
-        <div style={{position:'absolute',inset:0,background:'rgba(255,255,255,0.6)',
-          zIndex:50,pointerEvents:'none'}}/>
       )}
 
-      {/* X button — top right, like Matterport */}
-      <button onClick={() => { stopCamera(); setScreen('position_start') }}
-        style={{position:'absolute',top:14,right:16,zIndex:30,
-          width:40,height:40,borderRadius:'50%',border:'none',
-          background:'rgba(0,0,0,0.55)',color:'#fff',fontSize:20,
-          cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',
-          backdropFilter:'blur(4px)',WebkitTapHighlightColor:'transparent'}}>
-        ✕
-      </button>
-
-      {/* Coverage % — top left */}
-      <div style={{position:'absolute',top:16,left:16,zIndex:30,
-        background:'rgba(0,0,0,0.6)',color:'#fff',fontSize:13,fontWeight:600,
-        padding:'5px 12px',borderRadius:20,backdropFilter:'blur(4px)'}}>
-        {coveragePct}% covered
-      </div>
-
-      {/* Room + position — top center */}
-      <div style={{position:'absolute',top:16,left:'50%',transform:'translateX(-50%)',
-        zIndex:30,background:'rgba(100,150,255,0.85)',color:'#fff',
-        fontSize:12,fontWeight:700,padding:'4px 14px',borderRadius:20,whiteSpace:'nowrap'}}>
-        {roomName} · Pos {positionIdx+1}
-      </div>
-
-      {/* No gyro warning */}
-      {!gyroActive && (
-        <div style={{position:'absolute',top:60,left:'50%',transform:'translateX(-50%)',
-          zIndex:30,background:'rgba(255,180,0,0.12)',border:'1px solid rgba(255,180,0,0.3)',
-          color:'#ffb400',fontSize:12,padding:'5px 14px',borderRadius:20,whiteSpace:'nowrap'}}>
-          No gyro — tap capture button manually as you rotate
-        </div>
-      )}
-
-      {/* Instruction hint */}
-      {captureCount === 0 && (
-        <div style={{position:'absolute',top:gyroActive?60:100,
-          left:'50%',transform:'translateX(-50%)',
-          zIndex:30,background:'rgba(0,0,0,0.65)',color:'rgba(255,255,255,0.85)',
-          fontSize:13,padding:'6px 16px',borderRadius:20,whiteSpace:'nowrap'}}>
-          Slowly rotate phone — black areas auto-fill
-        </div>
-      )}
-
-      {/* Bottom bar — Undo + capture count + Done, like Matterport */}
-      <div style={{position:'absolute',bottom:0,left:0,right:0,zIndex:30,
-        padding:'14px 20px 40px',
-        background:'linear-gradient(to top,rgba(0,0,0,0.9) 60%,transparent)',
-        display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-
-        {/* Undo button */}
-        <button onClick={undoCapture}
-          disabled={captureCount === 0}
-          style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4,
-            background:'none',border:'none',color: captureCount>0 ? '#fff' : 'rgba(255,255,255,0.25)',
-            cursor: captureCount>0 ? 'pointer' : 'default',
-            WebkitTapHighlightColor:'transparent',minWidth:60}}>
-          <span style={{fontSize:22}}>↩</span>
-          <span style={{fontSize:11}}>Undo</span>
-        </button>
-
-        {/* Capture count + manual capture button */}
-        <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:6}}>
-          <div style={{fontSize:12,color:'rgba(255,255,255,0.6)',height:16}}>
-            {captureCount > 0 ? `${captureCount} captured` : ''}
-          </div>
-          <button onClick={doCapture}
-            style={{width:66,height:66,borderRadius:'50%',
-              border:'3px solid rgba(255,255,255,0.9)',
-              background:'rgba(255,255,255,0.15)',
-              cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',
-              WebkitTapHighlightColor:'transparent'}}>
-            <div style={{width:48,height:48,borderRadius:'50%',background:'white'}}/>
-          </button>
-        </div>
-
-        {/* Done button */}
-        <button onClick={finishPosition}
-          disabled={captureCount < 3}
-          style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4,
-            background:'none',border:'none',
-            color: captureCount>=3 ? '#32dc64' : 'rgba(255,255,255,0.25)',
-            cursor: captureCount>=3 ? 'pointer' : 'default',
-            WebkitTapHighlightColor:'transparent',minWidth:60}}>
-          <span style={{fontSize:22}}>✓</span>
-          <span style={{fontSize:11}}>Done</span>
-        </button>
-      </div>
-
-      {/* Coverage progress bar — bottom edge */}
-      <div style={{position:'absolute',bottom:0,left:0,right:0,height:3,zIndex:40,
-        background:'rgba(255,255,255,0.1)'}}>
-        <div style={{height:'100%',background:'#32dc64',
-          width:`${coveragePct}%`,transition:'width 0.3s'}}/>
-      </div>
-    </div>
-  )
-
-  // ── POSITION DONE ─────────────────────────────────────────────────
-  if (screen === 'position_done') return (
-    <div style={s.page}>
-      <Head><title>Position {positionIdx+1} Done!</title>
-        <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"/></Head>
-      <div style={s.inner}>
-        <div style={{fontSize:56}}>✅</div>
-        <h1 style={s.h1}>Position {positionIdx+1} Done!</h1>
-        <p style={s.sub}>
-          {currentCaptures.current.length} captures · {coveragePct}% coverage
-        </p>
-
-        {/* Capture thumbnails */}
-        {currentCaptures.current.length > 0 && (
-          <div style={{display:'flex',gap:6,overflowX:'auto',width:'100%',padding:'4px 0'}}>
-            {currentCaptures.current.slice(0,8).map((c,i) => (
-              <img key={i} src={c.url}
-                style={{width:72,height:72,objectFit:'cover',borderRadius:8,flexShrink:0}} alt=""/>
-            ))}
-          </div>
-        )}
-
-        <button style={s.btn} onClick={() => {
-          setPositionIdx(prev => prev + 1)
-          setScreen('position_start')
+      {/* ═══ REVIEW SCREEN ═══ */}
+      {screen === 'review' && (
+        <div style={{
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '20px',
+          background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)',
+          color: '#fff'
         }}>
-          + Add Another Position
-        </button>
+          <div style={{
+            width: '80px',
+            height: '80px',
+            borderRadius: '50%',
+            background: '#4CAF50',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: '40px',
+            marginBottom: '20px'
+          }}>
+            ✓
+          </div>
 
-        <button style={{...s.btn,background:'rgba(50,220,100,0.12)',
-          border:'1px solid rgba(50,220,100,0.3)',color:'#32dc64'}}
-          onClick={() => setScreen('room_done')}>
-          ✅ Finish Room
-        </button>
-      </div>
-    </div>
-  )
+          <h2 style={{ fontSize: '24px', marginBottom: '8px' }}>
+            Capture Complete!
+          </h2>
+          <p style={{ fontSize: '14px', color: '#aaa', marginBottom: '24px', textAlign: 'center' }}>
+            {capturedCount} shots captured for {roomName} — {positionLabel}
+          </p>
 
-  // ── ROOM DONE ─────────────────────────────────────────────────────
-  if (screen === 'room_done') return (
-    <div style={s.page}>
-      <Head><title>{roomName} Complete!</title>
-        <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"/></Head>
-      <div style={s.inner}>
-        <div style={{fontSize:60}}>🎉</div>
-        <h1 style={s.h1}>{roomName} Complete!</h1>
-        <p style={s.sub}>
-          {sweepsRef.current.length} position{sweepsRef.current.length!==1?'s':''} ·{' '}
-          {sweepsRef.current.reduce((s,sw) => s+sw.captures.length, 0)} total captures.
-          Download and send to PC via WhatsApp.
-        </p>
-
-        {thumbUrls.length > 0 && (
-          <div style={{display:'flex',gap:8,overflowX:'auto',width:'100%',padding:'4px 0'}}>
-            {thumbUrls.map((url,i) => (
-              <div key={i} style={{flexShrink:0,textAlign:'center'}}>
-                <img src={url} style={{width:80,height:80,objectFit:'cover',
-                  borderRadius:8,display:'block'}} alt=""/>
-                <div style={{fontSize:11,color:'#555',marginTop:4}}>Pos {i+1}</div>
+          {/* Thumbnail grid */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(4, 1fr)',
+            gap: '8px',
+            maxWidth: '320px',
+            width: '100%',
+            marginBottom: '24px',
+            maxHeight: '200px',
+            overflowY: 'auto'
+          }}>
+            {thumbnails.map((t, i) => (
+              <div key={t.id} style={{
+                aspectRatio: '4/3',
+                borderRadius: '8px',
+                overflow: 'hidden',
+                border: '1px solid rgba(255,255,255,0.2)'
+              }}>
+                <img src={t.url} alt={`Shot ${i+1}`} style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'cover'
+                }} />
               </div>
             ))}
           </div>
-        )}
 
-        <button style={s.btn} onClick={downloadRoomZip} disabled={zipping}>
-          {zipping
-            ? '⏳ Creating ZIP…'
-            : `📦 Download ${roomName.replace(/\s+/g,'_')}.zip`}
-        </button>
+          <div style={{ width: '100%', maxWidth: '320px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <button
+              onClick={downloadZip}
+              style={{
+                width: '100%',
+                padding: '16px',
+                borderRadius: '14px',
+                border: 'none',
+                background: '#4CAF50',
+                color: '#fff',
+                fontSize: '16px',
+                fontWeight: '600',
+                cursor: 'pointer'
+              }}
+            >
+              ⬇ Download ZIP
+            </button>
 
-        <button style={{...s.btn,background:'transparent',
-          border:'1px solid rgba(255,255,255,0.12)',color:'#777'}}
-          onClick={() => setScreen('home')}>
-          ← Back to Home
-        </button>
-      </div>
+            <button
+              onClick={nextPosition}
+              style={{
+                width: '100%',
+                padding: '14px',
+                borderRadius: '14px',
+                border: '1px solid #4CAF50',
+                background: 'transparent',
+                color: '#4CAF50',
+                fontSize: '16px',
+                fontWeight: '600',
+                cursor: 'pointer'
+              }}
+            >
+              + Scan Another Position
+            </button>
+
+            <button
+              onClick={() => {
+                setScreen('start')
+                setRoomName('')
+                setPositionLabel('Position 1')
+                setThumbnails([])
+                setCapturedCount(0)
+                setCoveragePct(0)
+                shotsRef.current = []
+              }}
+              style={{
+                width: '100%',
+                padding: '14px',
+                borderRadius: '14px',
+                border: '1px solid rgba(255,255,255,0.2)',
+                background: 'transparent',
+                color: '#aaa',
+                fontSize: '14px',
+                cursor: 'pointer'
+              }}
+            >
+              ← New Room
+            </button>
+          </div>
+
+          <p style={{ fontSize: '12px', color: '#666', marginTop: '20px', textAlign: 'center' }}>
+            Send the ZIP to your PC for stitching<br/>
+            into a 360° virtual tour
+          </p>
+        </div>
+      )}
+
+      {/* Global styles for animations */}
+      <style jsx global>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+          50% { opacity: 0.6; transform: translate(-50%, -50%) scale(1.1); }
+        }
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+          to { opacity: 1; transform: translateX(-50%) translateY(0); }
+        }
+      `}</style>
     </div>
   )
-
-  return null
-}
-
-const s = {
-  page:    { background:'#0f0f14', minHeight:'100vh', color:'#f0f0f0', fontFamily:'-apple-system,BlinkMacSystemFont,sans-serif' },
-  inner:   { display:'flex', flexDirection:'column', alignItems:'center', padding:'40px 24px', gap:16, textAlign:'center' },
-  h1:      { fontSize:24, fontWeight:700, margin:0 },
-  sub:     { fontSize:14, color:'#888', lineHeight:1.65, maxWidth:320, margin:0 },
-  btn:     { width:'100%', maxWidth:340, padding:15, borderRadius:12, border:'none', background:'#6496ff', color:'#fff', fontSize:15, fontWeight:600, cursor:'pointer' },
-  label:   { display:'block', fontSize:12, color:'#888', marginBottom:6, textAlign:'left' },
-  input:   { width:'100%', padding:'11px 14px', borderRadius:10, border:'1px solid rgba(255,255,255,0.12)', background:'rgba(255,255,255,0.06)', color:'#f0f0f0', fontSize:15, outline:'none' },
-  doneBox: { width:'100%', maxWidth:340, background:'rgba(50,220,100,0.05)', border:'1px solid rgba(50,220,100,0.18)', borderRadius:12, padding:'12px 14px', textAlign:'left' },
-  infoBox: { width:'100%', maxWidth:340, background:'rgba(255,255,255,0.04)', border:'1px solid rgba(255,255,255,0.07)', borderRadius:12, padding:'14px 16px', textAlign:'left' },
 }

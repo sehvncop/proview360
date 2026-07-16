@@ -14,6 +14,7 @@ export default function ScanPage() {
   const [isCapturing, setIsCapturing] = useState(false)
   const [guideText, setGuideText] = useState('Point camera to the FRONT')
   const [isAligned, setIsAligned] = useState(false)
+  const [showCaptureUI, setShowCaptureUI] = useState(false)
 
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
@@ -24,19 +25,17 @@ export default function ScanPage() {
   const orientationRef = useRef({ alpha: 0, beta: 0, gamma: 0 })
   const rafRef = useRef(null)
 
-  // 6-shot Matterport-style sequence
   const SHOTS = [
-    { id: 'front',  label: 'FRONT',  yaw: 0,   pitch: 0,   icon: '→' },
-    { id: 'right',  label: 'RIGHT',  yaw: 90,  pitch: 0,   icon: '↻' },
-    { id: 'back',   label: 'BACK',   yaw: 180, pitch: 0,   icon: '←' },
-    { id: 'left',   label: 'LEFT',   yaw: 270, pitch: 0,   icon: '↺' },
-    { id: 'top',    label: 'TOP',    yaw: 0,   pitch: 90,  icon: '↑' },
-    { id: 'bottom', label: 'BOTTOM', yaw: 0,   pitch: -90, icon: '↓' }
+    { id: 'front',  label: 'FRONT',  yaw: 0,   pitch: 0 },
+    { id: 'right',  label: 'RIGHT',  yaw: 90,  pitch: 0 },
+    { id: 'back',   label: 'BACK',   yaw: 180, pitch: 0 },
+    { id: 'left',   label: 'LEFT',   yaw: 270, pitch: 0 },
+    { id: 'top',    label: 'TOP',    yaw: 0,   pitch: 90 },
+    { id: 'bottom', label: 'BOTTOM', yaw: 0,   pitch: -90 }
   ]
-  const TOLERANCE = 25 // degrees
+  const TOLERANCE = 25
   const totalNeeded = SHOTS.length
 
-  // Device Orientation handler
   const handleOrientation = useCallback((e) => {
     orientationRef.current = {
       alpha: e.alpha || 0,
@@ -45,7 +44,6 @@ export default function ScanPage() {
     }
   }, [])
 
-  // Request orientation permission (iOS 13+)
   const requestOrientation = async () => {
     if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
       try {
@@ -54,9 +52,10 @@ export default function ScanPage() {
           window.addEventListener('deviceorientation', handleOrientation)
           return true
         }
-        return false
+        // Even if denied, we can still capture manually
+        return true
       } catch (e) {
-        return false
+        return true
       }
     } else {
       window.addEventListener('deviceorientation', handleOrientation)
@@ -64,34 +63,29 @@ export default function ScanPage() {
     }
   }
 
-  // Normalize angle to [-180, 180]
   const normalizeAngle = (a) => {
-    a = a % 360
+    a = ((a % 360) + 360) % 360
     if (a > 180) a -= 360
-    if (a < -180) a += 360
-    return a
+    return Math.abs(a)
   }
 
-  // Guidance loop
   const updateGuidance = useCallback(() => {
-    if (screen !== 'capture') return
+    if (!showCaptureUI) return
     const idx = currentShotRef.current
     if (idx >= SHOTS.length) return
 
     const target = SHOTS[idx]
     const o = orientationRef.current
 
-    // Calculate differences
-    const yawDiff = Math.abs(normalizeAngle(o.alpha - target.yaw))
+    const yawDiff = normalizeAngle(o.alpha - target.yaw)
     const pitchDiff = Math.abs(o.beta - target.pitch)
     const aligned = yawDiff < TOLERANCE && pitchDiff < TOLERANCE
 
     setIsAligned(aligned)
-    setGuideText(aligned ? `Hold steady — ${target.label} aligned!` : `Point camera to the ${target.label}`)
+    setGuideText(aligned ? `${target.label} — TAP NOW!` : `Point to ${target.label}`)
 
-    // Update guidance dot position
-    const dot = document.getElementById('guidance-dot')
-    const line = document.getElementById('guidance-line')
+    const dot = document.getElementById('guide-dot')
+    const line = document.getElementById('guide-line')
     if (!dot || !line) return
 
     if (aligned) {
@@ -100,43 +94,38 @@ export default function ScanPage() {
       return
     }
 
-    const centerX = window.innerWidth / 2
-    const centerY = window.innerHeight / 2
-    const scale = 3 // sensitivity
-    const offsetX = normalizeAngle(target.yaw - o.alpha) * scale
-    const offsetY = (target.pitch - o.beta) * scale
+    const cx = window.innerWidth / 2
+    const cy = window.innerHeight / 2
+    const scale = 4
+    const dx = normalizeAngle(target.yaw - o.alpha) * scale
+    const dy = (target.pitch - o.beta) * scale
 
-    const dotX = Math.max(30, Math.min(window.innerWidth - 30, centerX + offsetX))
-    const dotY = Math.max(100, Math.min(window.innerHeight - 180, centerY - offsetY))
+    const gx = Math.max(20, Math.min(window.innerWidth - 40, cx + dx))
+    const gy = Math.max(80, Math.min(window.innerHeight - 160, cy - dy))
 
-    dot.style.left = (dotX - 10) + 'px'
-    dot.style.top = (dotY - 10) + 'px'
+    dot.style.left = gx + 'px'
+    dot.style.top = gy + 'px'
     dot.style.display = 'block'
 
-    // Dashed line
-    const angle = Math.atan2(dotY - centerY, dotX - centerX)
-    const dist = Math.hypot(dotX - centerX, dotY - centerY)
-    line.style.left = centerX + 'px'
-    line.style.top = centerY + 'px'
+    const angle = Math.atan2(gy - cy, gx - cx)
+    const dist = Math.hypot(gx - cx, gy - cy)
+    line.style.left = cx + 'px'
+    line.style.top = cy + 'px'
     line.style.width = dist + 'px'
     line.style.transform = `rotate(${angle}rad)`
     line.style.display = 'block'
-  }, [screen])
+  }, [showCaptureUI])
 
-  // Animation frame loop for smooth guidance
   useEffect(() => {
-    if (screen !== 'capture') return
+    if (!showCaptureUI) return
     const loop = () => {
       updateGuidance()
       rafRef.current = requestAnimationFrame(loop)
     }
     rafRef.current = requestAnimationFrame(loop)
-    return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current)
-    }
-  }, [screen, updateGuidance])
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
+  }, [showCaptureUI, updateGuidance])
 
-  // Attach stream to video
   useEffect(() => {
     if (screen !== 'capture') return
     if (!streamRef.current) return
@@ -155,32 +144,23 @@ export default function ScanPage() {
     }
     setCameraError('')
     setIsCapturing(true)
-
-    const orientOk = await requestOrientation()
-    if (!orientOk) {
-      alert('Motion sensors required for guidance. Please allow access.')
-    }
+    await requestOrientation()
 
     try {
-      const constraints = {
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
-        },
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
-      }
-      const stream = await navigator.mediaDevices.getUserMedia(constraints)
+      })
       streamRef.current = stream
       currentShotRef.current = 0
       shotsRef.current = []
       setScreen('capture')
+      setShowCaptureUI(true)
       setCapturedCount(0)
       setCoveragePct(0)
       setThumbnails([])
     } catch (err) {
-      console.error('Camera error:', err)
-      setCameraError('Camera access denied. Please allow camera in Settings.')
+      setCameraError('Camera access denied. Allow camera in Settings.')
       setIsCapturing(false)
     }
   }
@@ -191,12 +171,8 @@ export default function ScanPage() {
 
     const video = videoRef.current
     const canvas = canvasRef.current
-    if (!video || !canvas) {
-      isProcessingRef.current = false
-      return
-    }
+    if (!video || !canvas) { isProcessingRef.current = false; return }
 
-    // Flash
     setFlash(true)
     setTimeout(() => setFlash(false), 120)
 
@@ -213,17 +189,15 @@ export default function ScanPage() {
       yaw: target.yaw,
       pitch: target.pitch,
       label: target.label,
-      blob: blob,
+      blob,
       timestamp: new Date().toISOString()
     }
     shotsRef.current.push(shot)
 
-    // Thumbnail
     const thumbCanvas = document.createElement('canvas')
     thumbCanvas.width = 160
     thumbCanvas.height = 120
-    const tctx = thumbCanvas.getContext('2d')
-    tctx.drawImage(video, 0, 0, 160, 120)
+    thumbCanvas.getContext('2d').drawImage(video, 0, 0, 160, 120)
     const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.6)
 
     setThumbnails(prev => [...prev, { id: shot.id, url: thumbUrl }])
@@ -253,6 +227,7 @@ export default function ScanPage() {
       streamRef.current = null
     }
     if (videoRef.current) videoRef.current.srcObject = null
+    setShowCaptureUI(false)
     setIsCapturing(false)
     setScreen('review')
   }
@@ -262,7 +237,7 @@ export default function ScanPage() {
     const folderName = `${roomName.replace(/\s+/g, '_')}_${positionLabel.replace(/\s+/g, '_')}`
     const folder = zip.folder(folderName)
 
-    const meta = {
+    folder.file('meta.json', JSON.stringify({
       room: roomName,
       position: positionLabel,
       capturedAt: new Date().toISOString(),
@@ -274,9 +249,8 @@ export default function ScanPage() {
         label: s.label,
         timestamp: s.timestamp
       }))
-    }
+    }, null, 2))
 
-    folder.file('meta.json', JSON.stringify(meta, null, 2))
     folder.file('metafile.json', JSON.stringify({
       platform: 'web',
       create_date: new Date().toISOString(),
@@ -292,9 +266,7 @@ export default function ScanPage() {
     const a = document.createElement('a')
     a.href = url
     a.download = `${folderName}.zip`
-    document.body.appendChild(a)
     a.click()
-    document.body.removeChild(a)
     URL.revokeObjectURL(url)
   }
 
@@ -318,7 +290,7 @@ export default function ScanPage() {
   }, [handleOrientation])
 
   return (
-    <div style={styles.page}>
+    <div style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', background: '#000', overflow: 'hidden', margin: 0, padding: 0, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
       <Head>
         <title>ProView360 - Scan</title>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
@@ -328,6 +300,7 @@ export default function ScanPage() {
 
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
+      {/* Video — always mounted, hidden via opacity */}
       <video
         ref={videoRef}
         autoPlay
@@ -336,40 +309,56 @@ export default function ScanPage() {
         disablePictureInPicture
         controls={false}
         style={{
-          ...styles.video,
+          position: 'fixed',
+          top: 0, left: 0,
+          width: '100vw',
+          height: '100vh',
+          objectFit: 'cover',
           opacity: screen === 'capture' ? 1 : 0,
-          pointerEvents: screen === 'capture' ? 'auto' : 'none'
+          zIndex: 1,
+          pointerEvents: 'none',
+          background: '#000'
         }}
       />
 
-      {/* START SCREEN */}
+      {/* ==================== START SCREEN ==================== */}
       {screen === 'start' && (
-        <div style={styles.startScreen}>
-          <div style={styles.logoBox}>360°</div>
-          <h1 style={styles.title}>ProView360</h1>
-          <p style={styles.subtitle}>Capture 360° panoramas for virtual tours</p>
+        <div style={{
+          position: 'fixed', inset: 0,
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)',
+          color: '#fff', zIndex: 100, overflowY: 'auto'
+        }}>
+          <div style={{
+            width: 80, height: 80, borderRadius: 20,
+            background: 'linear-gradient(135deg, #00d2ff, #3a7bd5)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 32, marginBottom: 20, boxShadow: '0 8px 32px rgba(0,210,255,0.3)'
+          }}>360°</div>
+          <h1 style={{ fontSize: 26, margin: '0 0 6px', fontWeight: 700 }}>ProView360</h1>
+          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>
+            Capture 360° panoramas for virtual tours
+          </p>
 
-          <div style={styles.formBox}>
-            <label style={styles.label}>Room Name</label>
-            <input
-              type="text"
-              value={roomName}
-              onChange={e => setRoomName(e.target.value)}
-              placeholder="e.g. Living Room"
-              style={styles.input}
-            />
-            <label style={styles.label}>Position Label</label>
-            <input
-              type="text"
-              value={positionLabel}
-              onChange={e => setPositionLabel(e.target.value)}
-              placeholder="e.g. Position 1"
-              style={styles.input}
-            />
+          <div style={{ width: '100%', maxWidth: 340 }}>
+            <label style={{ fontSize: 12, color: '#8b949e', display: 'block', marginBottom: 6, fontWeight: 500 }}>Room Name</label>
+            <input type="text" value={roomName} onChange={e => setRoomName(e.target.value)} placeholder="e.g. Living Room" style={{
+              width: '100%', padding: '14px 16px', borderRadius: 12, border: '1px solid #30363d',
+              background: '#0d1117', color: '#fff', fontSize: 16, marginBottom: 16, outline: 'none', boxSizing: 'border-box'
+            }} />
+            <label style={{ fontSize: 12, color: '#8b949e', display: 'block', marginBottom: 6, fontWeight: 500 }}>Position Label</label>
+            <input type="text" value={positionLabel} onChange={e => setPositionLabel(e.target.value)} placeholder="e.g. Position 1" style={{
+              width: '100%', padding: '14px 16px', borderRadius: 12, border: '1px solid #30363d',
+              background: '#0d1117', color: '#fff', fontSize: 16, marginBottom: 24, outline: 'none', boxSizing: 'border-box'
+            }} />
           </div>
 
-          <div style={styles.instructions}>
-            <strong>How to scan:</strong><br/>
+          <div style={{
+            background: 'rgba(48,54,61,0.4)', borderRadius: 12, padding: 16,
+            marginBottom: 24, maxWidth: 340, width: '100%', border: '1px solid #30363d',
+            fontSize: 13, color: '#c9d1d9', lineHeight: 1.7
+          }}>
+            <strong style={{ color: '#fff' }}>How to scan:</strong><br/>
             1. Stand in the center of the room<br/>
             2. Follow the white dot to aim at each direction<br/>
             3. Tap capture when the dot turns green<br/>
@@ -377,323 +366,238 @@ export default function ScanPage() {
             5. Download ZIP and stitch on desktop
           </div>
 
-          {cameraError && <p style={styles.errorText}>{cameraError}</p>}
+          {cameraError && <p style={{ fontSize: 12, color: '#ff6b6b', marginBottom: 12, textAlign: 'center', maxWidth: 340 }}>{cameraError}</p>}
 
-          <button onClick={startCapture} disabled={isCapturing} style={styles.startBtn(isCapturing)}>
-            {isCapturing ? 'Starting Camera...' : 'Start Scanning'}
-          </button>
+          <button onClick={startCapture} disabled={isCapturing} style={{
+            width: '100%', maxWidth: 340, padding: 16, borderRadius: 14, border: 'none',
+            background: isCapturing ? '#30363d' : '#00d2ff', color: isCapturing ? '#8b949e' : '#000',
+            fontSize: 17, fontWeight: 600, cursor: isCapturing ? 'wait' : 'pointer',
+            boxShadow: isCapturing ? 'none' : '0 4px 20px rgba(0,210,255,0.3)'
+          }}>{isCapturing ? 'Starting Camera...' : 'Start Scanning'}</button>
         </div>
       )}
 
-      {/* CAPTURE SCREEN */}
-      {screen === 'capture' && (
-        <div style={styles.captureScreen}>
-          {/* Vignette overlay */}
-          <div style={styles.vignette} />
+      {/* ==================== CAPTURE OVERLAY ==================== */}
+      {showCaptureUI && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 10,
+          pointerEvents: 'none'
+        }}>
+          {/* Vignette */}
+          <div style={{
+            position: 'absolute', inset: 0,
+            background: 'radial-gradient(circle at center, transparent 25%, rgba(0,0,0,0.45) 70%)',
+            pointerEvents: 'none', zIndex: 1
+          }} />
 
           {/* Top bar */}
-          <div style={styles.topBar}>
+          <div style={{
+            position: 'absolute', top: 0, left: 0, right: 0,
+            padding: '12px 16px 20px',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+            background: 'linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, transparent 100%)',
+            zIndex: 20, pointerEvents: 'auto'
+          }}>
             <div>
-              <div style={styles.roomName}>{roomName}</div>
-              <div style={styles.positionLabel}>{positionLabel}</div>
-              <div style={{ ...styles.guideText, color: isAligned ? '#34C759' : '#fff' }}>
+              <div style={{ fontSize: 18, fontWeight: 600, color: '#fff', letterSpacing: '-0.3px' }}>{roomName}</div>
+              <div style={{ fontSize: 13, color: '#aaa', marginTop: 2 }}>{positionLabel}</div>
+              <div style={{ fontSize: 12, marginTop: 4, fontWeight: 500, color: isAligned ? '#34C759' : '#fff' }}>
                 {guideText}
               </div>
             </div>
-            <button onClick={finishCapture} style={styles.closeBtn}>✕</button>
+            <button onClick={finishCapture} style={{
+              width: 36, height: 36, borderRadius: '50%', border: 'none',
+              background: 'rgba(255,255,255,0.2)', color: '#fff', fontSize: 20,
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              backdropFilter: 'blur(10px)', pointerEvents: 'auto'
+            }}>✕</button>
           </div>
 
           {/* Progress bar */}
-          <div style={styles.progressBarBg}>
-            <div style={{ ...styles.progressBarFill, width: `${coveragePct}%` }} />
+          <div style={{
+            position: 'absolute', top: 56, left: 16, right: 16,
+            height: 4, background: 'rgba(255,255,255,0.2)', borderRadius: 2, overflow: 'hidden', zIndex: 20
+          }}>
+            <div style={{
+              width: `${coveragePct}%`, height: '100%', background: '#34C759', borderRadius: 2,
+              transition: 'width 0.3s ease'
+            }} />
           </div>
-          <div style={styles.progressText}>{coveragePct}% coverage</div>
+          <div style={{ position: 'absolute', top: 64, right: 16, fontSize: 12, color: 'rgba(255,255,255,0.7)', zIndex: 20 }}>
+            {coveragePct}%
+          </div>
 
-          {/* Center reticle */}
-          <div style={styles.reticleContainer}>
-            <div style={styles.reticle}>
-              <div style={styles.reticleInner} />
+          {/* Center Reticle */}
+          <div style={{
+            position: 'absolute', top: '50%', left: '50%',
+            transform: 'translate(-50%, -50%)', zIndex: 15, pointerEvents: 'none'
+          }}>
+            <div style={{
+              width: 80, height: 80, borderRadius: '50%',
+              border: '2.5px solid rgba(255,255,255,0.95)',
+              position: 'relative',
+              boxShadow: '0 0 20px rgba(255,255,255,0.15), inset 0 0 20px rgba(255,255,255,0.05)'
+            }}>
+              {/* Crosshair horizontal */}
+              <div style={{
+                position: 'absolute', top: '50%', left: '15%', right: '15%',
+                height: 1.5, background: 'rgba(255,255,255,0.9)', transform: 'translateY(-50%)'
+              }} />
+              {/* Crosshair vertical */}
+              <div style={{
+                position: 'absolute', left: '50%', top: '15%', bottom: '15%',
+                width: 1.5, background: 'rgba(255,255,255,0.9)', transform: 'translateX(-50%)'
+              }} />
+              {/* Center dot */}
+              <div style={{
+                position: 'absolute', top: '50%', left: '50%',
+                transform: 'translate(-50%, -50%)',
+                width: 8, height: 8, borderRadius: '50%', background: '#fff'
+              }} />
             </div>
           </div>
 
-          {/* Guidance dot & dashed line */}
-          <div id="guidance-line" style={styles.guidanceLine} />
-          <div id="guidance-dot" style={styles.guidanceDot} />
+          {/* Guidance dot */}
+          <div id="guide-dot" style={{
+            position: 'absolute', width: 22, height: 22,
+            border: '2.5px solid #fff', borderRadius: '50%',
+            background: 'rgba(255,255,255,0.15)', zIndex: 16,
+            pointerEvents: 'none', display: 'none',
+            boxShadow: '0 0 12px rgba(255,255,255,0.3)'
+          }} />
+
+          {/* Dashed line */}
+          <div id="guide-line" style={{
+            position: 'absolute', height: 2,
+            background: 'repeating-linear-gradient(90deg, rgba(255,255,255,0.9) 0, rgba(255,255,255,0.9) 5px, transparent 5px, transparent 10px)',
+            zIndex: 14, pointerEvents: 'none', display: 'none',
+            transformOrigin: 'left center'
+          }} />
 
           {/* Flash */}
-          {flash && <div style={styles.flash} />}
+          {flash && (
+            <div style={{
+              position: 'absolute', inset: 0, background: '#fff',
+              opacity: 0.35, zIndex: 50, pointerEvents: 'none'
+            }} />
+          )}
 
           {/* Thumbnail strip */}
           {thumbnails.length > 0 && (
-            <div style={styles.thumbStrip}>
+            <div style={{
+              position: 'absolute', bottom: 120, left: 12,
+              display: 'flex', gap: 8, zIndex: 20,
+              overflowX: 'auto', maxWidth: '65%', padding: 4,
+              pointerEvents: 'auto'
+            }}>
               {thumbnails.map((t, i) => (
-                <div key={t.id} style={styles.thumbBox}>
-                  <img src={t.url} alt={`Shot ${i+1}`} style={styles.thumbImg} />
+                <div key={t.id} style={{
+                  flexShrink: 0, width: 52, height: 52,
+                  borderRadius: 8, overflow: 'hidden',
+                  border: '2px solid rgba(255,255,255,0.35)'
+                }}>
+                  <img src={t.url} alt={`Shot ${i+1}`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                 </div>
               ))}
             </div>
           )}
 
           {/* Bottom controls */}
-          <div style={styles.bottomControls}>
+          <div style={{
+            position: 'absolute', bottom: 0, left: 0, right: 0,
+            padding: '16px 20px 36px',
+            background: 'linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 100%)',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            zIndex: 20, pointerEvents: 'auto'
+          }}>
+            {/* Undo */}
             <button
               onClick={undoLast}
-              disabled={thumbnails.length === 0}
               style={{
-                ...styles.undoBtn,
-                opacity: thumbnails.length > 0 ? 1 : 0.4,
-                pointerEvents: thumbnails.length > 0 ? 'auto' : 'none'
+                padding: '10px 16px', borderRadius: 20, border: 'none',
+                background: thumbnails.length > 0 ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.08)',
+                color: '#fff', fontSize: 15, fontWeight: 500,
+                cursor: thumbnails.length > 0 ? 'pointer' : 'default',
+                backdropFilter: 'blur(10px)', pointerEvents: thumbnails.length > 0 ? 'auto' : 'none',
+                opacity: thumbnails.length > 0 ? 1 : 0.4, transition: 'all 0.2s'
               }}
-            >
-              ↩ Undo
-            </button>
+            >↩ Undo</button>
 
+            {/* Shutter */}
             <button
               onClick={captureFrame}
-              disabled={isProcessingRef.current}
               style={{
-                ...styles.shutterBtn,
-                background: isAligned ? '#34C759' : 'rgba(255,255,255,0.15)',
-                transform: isProcessingRef.current ? 'scale(0.9)' : 'scale(1)'
+                width: 76, height: 76, borderRadius: '50%',
+                border: `4px solid ${isAligned ? '#34C759' : 'rgba(255,255,255,0.4)'}`,
+                background: isAligned ? 'rgba(52,199,89,0.25)' : 'rgba(255,255,255,0.12)',
+                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                padding: 0, transition: 'all 0.2s'
               }}
             >
               <div style={{
-                ...styles.shutterInner,
-                background: isAligned ? '#fff' : '#fff'
+                width: 60, height: 60, borderRadius: '50%',
+                background: isAligned ? '#34C759' : '#fff'
               }} />
             </button>
 
+            {/* Done */}
             <button
               onClick={finishCapture}
               style={{
-                ...styles.doneBtn,
+                padding: '10px 18px', borderRadius: 20, border: 'none',
+                background: capturedCount >= totalNeeded ? '#34C759' : 'rgba(255,255,255,0.08)',
+                color: '#fff', fontSize: 15, fontWeight: 600,
+                cursor: 'pointer', backdropFilter: 'blur(10px)',
                 opacity: capturedCount >= totalNeeded ? 1 : 0.4,
-                background: capturedCount >= totalNeeded ? '#34C759' : 'rgba(0,0,0,0.6)'
+                transition: 'all 0.2s'
               }}
-            >
-              Done
-            </button>
+            >Done</button>
           </div>
         </div>
       )}
 
-      {/* REVIEW SCREEN */}
+      {/* ==================== REVIEW SCREEN ==================== */}
       {screen === 'review' && (
-        <div style={styles.reviewScreen}>
-          <div style={styles.checkmark}>✓</div>
-          <h2 style={styles.reviewTitle}>Capture Complete!</h2>
-          <p style={styles.reviewSub}>{capturedCount} shots captured<br/>{roomName} — {positionLabel}</p>
+        <div style={{
+          position: 'fixed', inset: 0,
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)',
+          color: '#fff', zIndex: 100, overflowY: 'auto'
+        }}>
+          <div style={{
+            width: 72, height: 72, borderRadius: '50%', background: '#34C759',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 32, marginBottom: 20, color: '#fff'
+          }}>✓</div>
+          <h2 style={{ fontSize: 24, margin: '0 0 6px', fontWeight: 700 }}>Capture Complete!</h2>
+          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 24px', textAlign: 'center' }}>
+            {capturedCount} shots captured<br/>{roomName} — {positionLabel}
+          </p>
 
-          <div style={styles.reviewGrid}>
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
+            gap: 8, maxWidth: 320, width: '100%', marginBottom: 24
+          }}>
             {thumbnails.map((t, i) => (
-              <div key={t.id} style={styles.reviewThumbBox}>
-                <img src={t.url} alt={`Shot ${i+1}`} style={styles.reviewThumbImg} />
+              <div key={t.id} style={{ aspectRatio: 1, borderRadius: 8, overflow: 'hidden', border: '1px solid #30363d' }}>
+                <img src={t.url} alt={`Shot ${i+1}`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
               </div>
             ))}
           </div>
 
-          <div style={styles.reviewActions}>
-            <button onClick={downloadZip} style={styles.downloadBtn}>⬇ Download ZIP</button>
-            <button onClick={nextPosition} style={styles.nextPosBtn}>+ Next Position</button>
+          <div style={{ width: '100%', maxWidth: 320, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <button onClick={downloadZip} style={{
+              width: '100%', padding: 16, borderRadius: 14, border: 'none',
+              background: '#00d2ff', color: '#000', fontSize: 16, fontWeight: 600, cursor: 'pointer'
+            }}>⬇ Download ZIP</button>
+            <button onClick={nextPosition} style={{
+              width: '100%', padding: 14, borderRadius: 14,
+              border: '1px solid #00d2ff', background: 'transparent',
+              color: '#00d2ff', fontSize: 16, fontWeight: 600, cursor: 'pointer'
+            }}>+ Next Position</button>
           </div>
         </div>
       )}
     </div>
   )
-}
-
-const styles = {
-  page: {
-    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-    width: '100%', height: '100%',
-    background: '#000', overflow: 'hidden', margin: 0, padding: 0,
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
-  },
-  video: {
-    position: 'fixed', top: 0, left: 0,
-    width: '100vw', height: '100vh',
-    objectFit: 'cover', zIndex: 1,
-    background: '#000', transition: 'opacity 0.3s ease'
-  },
-  startScreen: {
-    position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-    padding: '24px', background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)',
-    color: '#fff', boxSizing: 'border-box', zIndex: 100, overflowY: 'auto'
-  },
-  logoBox: {
-    width: '80px', height: '80px', borderRadius: '20px',
-    background: 'linear-gradient(135deg, #00d2ff, #3a7bd5)',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    fontSize: '32px', marginBottom: '20px',
-    boxShadow: '0 8px 32px rgba(0,210,255,0.3)'
-  },
-  title: { fontSize: '26px', margin: '0 0 6px 0', fontWeight: '700', textAlign: 'center' },
-  subtitle: { fontSize: '14px', color: '#8b949e', margin: '0 0 32px 0', textAlign: 'center' },
-  formBox: { width: '100%', maxWidth: '340px' },
-  label: { fontSize: '12px', color: '#8b949e', display: 'block', marginBottom: '6px', fontWeight: '500' },
-  input: {
-    width: '100%', padding: '14px 16px', borderRadius: '12px',
-    border: '1px solid #30363d', background: '#0d1117', color: '#fff',
-    fontSize: '16px', marginBottom: '16px', outline: 'none', boxSizing: 'border-box'
-  },
-  instructions: {
-    background: 'rgba(48,54,61,0.4)', borderRadius: '12px', padding: '16px',
-    marginBottom: '24px', maxWidth: '340px', width: '100%', border: '1px solid #30363d',
-    fontSize: '13px', color: '#c9d1d9', lineHeight: '1.7'
-  },
-  errorText: { fontSize: '12px', color: '#ff6b6b', marginBottom: '12px', textAlign: 'center', maxWidth: '340px' },
-  startBtn: (disabled) => ({
-    width: '100%', maxWidth: '340px', padding: '16px', borderRadius: '14px',
-    border: 'none', background: disabled ? '#30363d' : '#00d2ff',
-    color: disabled ? '#8b949e' : '#000',
-    fontSize: '17px', fontWeight: '600', cursor: disabled ? 'wait' : 'pointer',
-    boxShadow: disabled ? 'none' : '0 4px 20px rgba(0,210,255,0.3)',
-    transition: 'all 0.2s'
-  }),
-
-  // CAPTURE
-  captureScreen: {
-    position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', overflow: 'hidden'
-  },
-  vignette: {
-    position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-    pointerEvents: 'none', zIndex: 2,
-    background: 'radial-gradient(circle at center, transparent 30%, rgba(0,0,0,0.4) 70%)'
-  },
-  topBar: {
-    position: 'fixed', top: 0, left: 0, right: 0,
-    padding: '12px 16px 24px',
-    display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-    background: 'linear-gradient(to bottom, rgba(0,0,0,0.7) 0%, transparent 100%)',
-    zIndex: 10
-  },
-  roomName: { fontSize: '18px', fontWeight: '600', color: '#fff', letterSpacing: '-0.3px' },
-  positionLabel: { fontSize: '13px', color: '#aaa', marginTop: '2px' },
-  guideText: { fontSize: '12px', marginTop: '4px', fontWeight: '500', transition: 'color 0.3s' },
-  closeBtn: {
-    width: '36px', height: '36px', borderRadius: '50%',
-    border: 'none', background: 'rgba(255,255,255,0.15)', color: '#fff',
-    fontSize: '20px', cursor: 'pointer', display: 'flex',
-    alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(10px)'
-  },
-  progressBarBg: {
-    position: 'fixed', top: '56px', left: '16px', right: '16px',
-    height: '4px', background: 'rgba(255,255,255,0.2)',
-    borderRadius: '2px', overflow: 'hidden', zIndex: 10
-  },
-  progressBarFill: {
-    height: '100%', background: '#34C759', borderRadius: '2px', transition: 'width 0.4s ease'
-  },
-  progressText: {
-    position: 'fixed', top: '64px', right: '16px',
-    fontSize: '12px', color: 'rgba(255,255,255,0.7)', zIndex: 10
-  },
-  reticleContainer: {
-    position: 'fixed', top: '50%', left: '50%',
-    transform: 'translate(-50%, -50%)', zIndex: 5, pointerEvents: 'none'
-  },
-  reticle: {
-    width: '80px', height: '80px',
-    border: '2px solid rgba(255,255,255,0.9)', borderRadius: '50%',
-    position: 'relative'
-  },
-  reticleInner: {
-    position: 'absolute', top: '50%', left: '50%',
-    transform: 'translate(-50%, -50%)',
-    width: '8px', height: '8px', background: '#fff', borderRadius: '50%'
-  },
-  guidanceDot: {
-    position: 'absolute', width: '20px', height: '20px',
-    border: '2px solid #fff', borderRadius: '50%',
-    background: 'rgba(255,255,255,0.2)', zIndex: 6,
-    pointerEvents: 'none', display: 'none',
-    animation: 'pulse 1.5s infinite'
-  },
-  guidanceLine: {
-    position: 'absolute', height: '2px',
-    background: 'repeating-linear-gradient(90deg, #fff 0, #fff 6px, transparent 6px, transparent 12px)',
-    zIndex: 5, pointerEvents: 'none', display: 'none',
-    transformOrigin: 'left center'
-  },
-  flash: {
-    position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-    background: '#fff', opacity: 0.3, zIndex: 20, pointerEvents: 'none'
-  },
-  thumbStrip: {
-    position: 'fixed', bottom: '120px', left: '16px',
-    display: 'flex', gap: '8px', zIndex: 10,
-    overflowX: 'auto', maxWidth: '60%', padding: '4px',
-    scrollbarWidth: 'none'
-  },
-  thumbBox: {
-    flexShrink: 0, width: '48px', height: '48px',
-    borderRadius: '8px', overflow: 'hidden',
-    border: '2px solid rgba(255,255,255,0.3)'
-  },
-  thumbImg: { width: '100%', height: '100%', objectFit: 'cover', display: 'block' },
-  bottomControls: {
-    position: 'fixed', bottom: 0, left: 0, right: 0,
-    padding: '20px 24px 40px',
-    background: 'linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 100%)',
-    display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 10
-  },
-  undoBtn: {
-    display: 'flex', alignItems: 'center', gap: '6px',
-    background: 'rgba(255,255,255,0.15)', backdropFilter: 'blur(10px)',
-    border: 'none', color: '#fff', padding: '10px 16px',
-    borderRadius: '20px', fontSize: '15px', fontWeight: '500', cursor: 'pointer',
-    transition: 'all 0.2s'
-  },
-  shutterBtn: {
-    width: '72px', height: '72px', borderRadius: '50%',
-    background: 'rgba(255,255,255,0.15)', border: '4px solid rgba(255,255,255,0.3)',
-    position: 'relative', cursor: 'pointer', transition: 'transform 0.1s',
-    display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0
-  },
-  shutterInner: {
-    width: '64px', height: '64px', borderRadius: '50%', background: '#fff'
-  },
-  doneBtn: {
-    background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(10px)',
-    border: 'none', color: '#fff', padding: '10px 20px',
-    borderRadius: '20px', fontSize: '15px', fontWeight: '600', cursor: 'pointer',
-    transition: 'all 0.2s'
-  },
-
-  // REVIEW
-  reviewScreen: {
-    position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-    padding: '24px', background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)',
-    color: '#fff', boxSizing: 'border-box', zIndex: 100, overflowY: 'auto'
-  },
-  checkmark: {
-    width: '72px', height: '72px', borderRadius: '50%', background: '#34C759',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    fontSize: '32px', marginBottom: '20px', color: '#fff'
-  },
-  reviewTitle: { fontSize: '24px', margin: '0 0 6px 0', fontWeight: '700' },
-  reviewSub: { fontSize: '14px', color: '#8b949e', margin: '0 0 24px 0', textAlign: 'center' },
-  reviewGrid: {
-    display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
-    gap: '8px', maxWidth: '320px', width: '100%', marginBottom: '24px'
-  },
-  reviewThumbBox: {
-    aspectRatio: '1', borderRadius: '8px', overflow: 'hidden', border: '1px solid #30363d'
-  },
-  reviewThumbImg: { width: '100%', height: '100%', objectFit: 'cover', display: 'block' },
-  reviewActions: {
-    width: '100%', maxWidth: '320px', display: 'flex', flexDirection: 'column', gap: '12px'
-  },
-  downloadBtn: {
-    width: '100%', padding: '16px', borderRadius: '14px',
-    border: 'none', background: '#00d2ff', color: '#000',
-    fontSize: '16px', fontWeight: '600', cursor: 'pointer'
-  },
-  nextPosBtn: {
-    width: '100%', padding: '14px', borderRadius: '14px',
-    border: '1px solid #00d2ff', background: 'transparent',
-    color: '#00d2ff', fontSize: '16px', fontWeight: '600', cursor: 'pointer'
-  }
 }

@@ -12,7 +12,7 @@ export default function ScanPage() {
   const [thumbnails, setThumbnails] = useState([])
   const [cameraError, setCameraError] = useState('')
   const [isCapturing, setIsCapturing] = useState(false)
-  const [guideText, setGuideText] = useState('Point camera to the FRONT')
+  const [guideText, setGuideText] = useState('Point to FRONT')
   const [isAligned, setIsAligned] = useState(false)
   const [showCaptureUI, setShowCaptureUI] = useState(false)
 
@@ -37,11 +37,7 @@ export default function ScanPage() {
   const totalNeeded = SHOTS.length
 
   const handleOrientation = useCallback((e) => {
-    orientationRef.current = {
-      alpha: e.alpha || 0,
-      beta: e.beta || 0,
-      gamma: e.gamma || 0
-    }
+    orientationRef.current = { alpha: e.alpha || 0, beta: e.beta || 0, gamma: e.gamma || 0 }
   }, [])
 
   const requestOrientation = async () => {
@@ -52,11 +48,8 @@ export default function ScanPage() {
           window.addEventListener('deviceorientation', handleOrientation)
           return true
         }
-        // Even if denied, we can still capture manually
         return true
-      } catch (e) {
-        return true
-      }
+      } catch (e) { return true }
     } else {
       window.addEventListener('deviceorientation', handleOrientation)
       return true
@@ -76,13 +69,12 @@ export default function ScanPage() {
 
     const target = SHOTS[idx]
     const o = orientationRef.current
-
     const yawDiff = normalizeAngle(o.alpha - target.yaw)
     const pitchDiff = Math.abs(o.beta - target.pitch)
     const aligned = yawDiff < TOLERANCE && pitchDiff < TOLERANCE
 
     setIsAligned(aligned)
-    setGuideText(aligned ? `${target.label} — TAP NOW!` : `Point to ${target.label}`)
+    setGuideText(aligned ? `${target.label} — TAP` : `Point to ${target.label}`)
 
     const dot = document.getElementById('guide-dot')
     const line = document.getElementById('guide-line')
@@ -118,18 +110,14 @@ export default function ScanPage() {
 
   useEffect(() => {
     if (!showCaptureUI) return
-    const loop = () => {
-      updateGuidance()
-      rafRef.current = requestAnimationFrame(loop)
-    }
+    const loop = () => { updateGuidance(); rafRef.current = requestAnimationFrame(loop) }
     rafRef.current = requestAnimationFrame(loop)
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
   }, [showCaptureUI, updateGuidance])
 
   useEffect(() => {
     if (screen !== 'capture') return
-    if (!streamRef.current) return
-    if (!videoRef.current) return
+    if (!streamRef.current || !videoRef.current) return
     const video = videoRef.current
     if (video.srcObject !== streamRef.current) {
       video.srcObject = streamRef.current
@@ -138,14 +126,10 @@ export default function ScanPage() {
   }, [screen])
 
   const startCapture = async () => {
-    if (!roomName.trim()) {
-      alert('Enter room name first')
-      return
-    }
+    if (!roomName.trim()) { alert('Enter room name'); return }
     setCameraError('')
     setIsCapturing(true)
     await requestOrientation()
-
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -160,7 +144,7 @@ export default function ScanPage() {
       setCoveragePct(0)
       setThumbnails([])
     } catch (err) {
-      setCameraError('Camera access denied. Allow camera in Settings.')
+      setCameraError('Camera access denied')
       setIsCapturing(false)
     }
   }
@@ -168,7 +152,6 @@ export default function ScanPage() {
   const captureFrame = async () => {
     if (isProcessingRef.current) return
     isProcessingRef.current = true
-
     const video = videoRef.current
     const canvas = canvasRef.current
     if (!video || !canvas) { isProcessingRef.current = false; return }
@@ -178,37 +161,27 @@ export default function ScanPage() {
 
     canvas.width = video.videoWidth || 1920
     canvas.height = video.videoHeight || 1080
-    const ctx = canvas.getContext('2d')
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
     const target = SHOTS[currentShotRef.current]
 
     const shot = {
-      id: Date.now(),
-      yaw: target.yaw,
-      pitch: target.pitch,
-      label: target.label,
-      blob,
-      timestamp: new Date().toISOString()
+      id: Date.now(), yaw: target.yaw, pitch: target.pitch,
+      label: target.label, blob, timestamp: new Date().toISOString()
     }
     shotsRef.current.push(shot)
 
     const thumbCanvas = document.createElement('canvas')
-    thumbCanvas.width = 160
-    thumbCanvas.height = 120
-    thumbCanvas.getContext('2d').drawImage(video, 0, 0, 160, 120)
+    thumbCanvas.width = 120; thumbCanvas.height = 90
+    thumbCanvas.getContext('2d').drawImage(video, 0, 0, 120, 90)
     const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.6)
 
     setThumbnails(prev => [...prev, { id: shot.id, url: thumbUrl }])
     const count = shotsRef.current.length
     setCapturedCount(count)
     setCoveragePct(Math.min(100, Math.round((count / totalNeeded) * 100)))
-
     currentShotRef.current = count
-    if (count >= totalNeeded) {
-      setTimeout(() => finishCapture(), 400)
-    }
+    if (count >= totalNeeded) setTimeout(() => finishCapture(), 400)
     isProcessingRef.current = false
   }
 
@@ -222,10 +195,7 @@ export default function ScanPage() {
   }
 
   const finishCapture = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop())
-      streamRef.current = null
-    }
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null }
     if (videoRef.current) videoRef.current.srcObject = null
     setShowCaptureUI(false)
     setIsCapturing(false)
@@ -236,49 +206,28 @@ export default function ScanPage() {
     const zip = new JSZip()
     const folderName = `${roomName.replace(/\s+/g, '_')}_${positionLabel.replace(/\s+/g, '_')}`
     const folder = zip.folder(folderName)
-
     folder.file('meta.json', JSON.stringify({
-      room: roomName,
-      position: positionLabel,
-      capturedAt: new Date().toISOString(),
+      room: roomName, position: positionLabel, capturedAt: new Date().toISOString(),
       shotCount: shotsRef.current.length,
       shots: shotsRef.current.map((s, i) => ({
         filename: `shot_${String(i + 1).padStart(3, '0')}.jpg`,
-        yaw: s.yaw,
-        pitch: s.pitch,
-        label: s.label,
-        timestamp: s.timestamp
+        yaw: s.yaw, pitch: s.pitch, label: s.label, timestamp: s.timestamp
       }))
     }, null, 2))
-
-    folder.file('metafile.json', JSON.stringify({
-      platform: 'web',
-      create_date: new Date().toISOString(),
-      app_version: '1.0.0'
-    }, null, 2))
-
-    shotsRef.current.forEach((shot, i) => {
-      folder.file(`shot_${String(i + 1).padStart(3, '0')}.jpg`, shot.blob)
-    })
-
+    folder.file('metafile.json', JSON.stringify({ platform: 'web', create_date: new Date().toISOString(), app_version: '1.0.0' }, null, 2))
+    shotsRef.current.forEach((shot, i) => folder.file(`shot_${String(i + 1).padStart(3, '0')}.jpg`, shot.blob))
     const content = await zip.generateAsync({ type: 'blob' })
     const url = URL.createObjectURL(content)
     const a = document.createElement('a')
-    a.href = url
-    a.download = `${folderName}.zip`
-    a.click()
-    URL.revokeObjectURL(url)
+    a.href = url; a.download = `${folderName}.zip`; a.click(); URL.revokeObjectURL(url)
   }
 
   const nextPosition = () => {
     const nextNum = parseInt(positionLabel.replace(/\D/g, '')) + 1
     setPositionLabel(`Position ${nextNum}`)
     setScreen('start')
-    setThumbnails([])
-    setCapturedCount(0)
-    setCoveragePct(0)
-    shotsRef.current = []
-    currentShotRef.current = 0
+    setThumbnails([]); setCapturedCount(0); setCoveragePct(0)
+    shotsRef.current = []; currentShotRef.current = 0
   }
 
   useEffect(() => {
@@ -297,246 +246,307 @@ export default function ScanPage() {
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
       </Head>
-
       <canvas ref={canvasRef} style={{ display: 'none' }} />
+      <video ref={videoRef} autoPlay playsInline muted disablePictureInPicture controls={false}
+        style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', objectFit: 'cover', opacity: screen === 'capture' ? 1 : 0, zIndex: 1, pointerEvents: 'none', background: '#000' }} />
 
-      {/* Video — always mounted, hidden via opacity */}
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        disablePictureInPicture
-        controls={false}
-        style={{
-          position: 'fixed',
-          top: 0, left: 0,
-          width: '100vw',
-          height: '100vh',
-          objectFit: 'cover',
-          opacity: screen === 'capture' ? 1 : 0,
-          zIndex: 1,
-          pointerEvents: 'none',
-          background: '#000'
-        }}
-      />
-
-      {/* ==================== START SCREEN ==================== */}
+      {/* START SCREEN */}
       {screen === 'start' && (
-        <div style={{
-          position: 'fixed', inset: 0,
-          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)',
-          color: '#fff', zIndex: 100, overflowY: 'auto'
-        }}>
-          <div style={{
-            width: 80, height: 80, borderRadius: 20,
-            background: 'linear-gradient(135deg, #00d2ff, #3a7bd5)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 32, marginBottom: 20, boxShadow: '0 8px 32px rgba(0,210,255,0.3)'
-          }}>360°</div>
+        <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)', color: '#fff', zIndex: 100, overflowY: 'auto' }}>
+          <div style={{ width: 72, height: 72, borderRadius: 18, background: 'linear-gradient(135deg, #00d2ff, #3a7bd5)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, marginBottom: 20, boxShadow: '0 8px 32px rgba(0,210,255,0.3)' }}>360°</div>
           <h1 style={{ fontSize: 26, margin: '0 0 6px', fontWeight: 700 }}>ProView360</h1>
-          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>
-            Capture 360° panoramas for virtual tours
-          </p>
-
+          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>Capture 360° panoramas for virtual tours</p>
           <div style={{ width: '100%', maxWidth: 340 }}>
             <label style={{ fontSize: 12, color: '#8b949e', display: 'block', marginBottom: 6, fontWeight: 500 }}>Room Name</label>
-            <input type="text" value={roomName} onChange={e => setRoomName(e.target.value)} placeholder="e.g. Living Room" style={{
-              width: '100%', padding: '14px 16px', borderRadius: 12, border: '1px solid #30363d',
-              background: '#0d1117', color: '#fff', fontSize: 16, marginBottom: 16, outline: 'none', boxSizing: 'border-box'
-            }} />
+            <input type="text" value={roomName} onChange={e => setRoomName(e.target.value)} placeholder="e.g. Living Room" style={{ width: '100%', padding: '14px 16px', borderRadius: 12, border: '1px solid #30363d', background: '#0d1117', color: '#fff', fontSize: 16, marginBottom: 16, outline: 'none', boxSizing: 'border-box' }} />
             <label style={{ fontSize: 12, color: '#8b949e', display: 'block', marginBottom: 6, fontWeight: 500 }}>Position Label</label>
-            <input type="text" value={positionLabel} onChange={e => setPositionLabel(e.target.value)} placeholder="e.g. Position 1" style={{
-              width: '100%', padding: '14px 16px', borderRadius: 12, border: '1px solid #30363d',
-              background: '#0d1117', color: '#fff', fontSize: 16, marginBottom: 24, outline: 'none', boxSizing: 'border-box'
-            }} />
+            <input type="text" value={positionLabel} onChange={e => setPositionLabel(e.target.value)} placeholder="e.g. Position 1" style={{ width: '100%', padding: '14px 16px', borderRadius: 12, border: '1px solid #30363d', background: '#0d1117', color: '#fff', fontSize: 16, marginBottom: 24, outline: 'none', boxSizing: 'border-box' }} />
           </div>
-
-          <div style={{
-            background: 'rgba(48,54,61,0.4)', borderRadius: 12, padding: 16,
-            marginBottom: 24, maxWidth: 340, width: '100%', border: '1px solid #30363d',
-            fontSize: 13, color: '#c9d1d9', lineHeight: 1.7
-          }}>
+          <div style={{ background: 'rgba(48,54,61,0.4)', borderRadius: 12, padding: 16, marginBottom: 24, maxWidth: 340, width: '100%', border: '1px solid #30363d', fontSize: 13, color: '#c9d1d9', lineHeight: 1.7 }}>
             <strong style={{ color: '#fff' }}>How to scan:</strong><br/>
             1. Stand in the center of the room<br/>
             2. Follow the white dot to aim at each direction<br/>
-            3. Tap capture when the dot turns green<br/>
-            4. 6 shots: Front → Right → Back → Left → Top → Bottom<br/>
-            5. Download ZIP and stitch on desktop
+            3. Tap capture when aligned<br/>
+            4. 6 shots: Front → Right → Back → Left → Top → Bottom
           </div>
-
           {cameraError && <p style={{ fontSize: 12, color: '#ff6b6b', marginBottom: 12, textAlign: 'center', maxWidth: 340 }}>{cameraError}</p>}
-
-          <button onClick={startCapture} disabled={isCapturing} style={{
-            width: '100%', maxWidth: 340, padding: 16, borderRadius: 14, border: 'none',
-            background: isCapturing ? '#30363d' : '#00d2ff', color: isCapturing ? '#8b949e' : '#000',
-            fontSize: 17, fontWeight: 600, cursor: isCapturing ? 'wait' : 'pointer',
-            boxShadow: isCapturing ? 'none' : '0 4px 20px rgba(0,210,255,0.3)'
-          }}>{isCapturing ? 'Starting Camera...' : 'Start Scanning'}</button>
+          <button onClick={startCapture} disabled={isCapturing} style={{ width: '100%', maxWidth: 340, padding: 16, borderRadius: 14, border: 'none', background: isCapturing ? '#30363d' : '#00d2ff', color: isCapturing ? '#8b949e' : '#000', fontSize: 17, fontWeight: 600, cursor: isCapturing ? 'wait' : 'pointer', boxShadow: isCapturing ? 'none' : '0 4px 20px rgba(0,210,255,0.3)' }}>{isCapturing ? 'Starting...' : 'Start Scanning'}</button>
         </div>
       )}
 
-      {/* ==================== CAPTURE OVERLAY ==================== */}
+      {/* ==================== CAPTURE OVERLAY — EXACT MATTERPORT STYLE ==================== */}
       {showCaptureUI && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 10,
-          pointerEvents: 'none'
-        }}>
-          {/* Vignette */}
-          <div style={{
-            position: 'absolute', inset: 0,
-            background: 'radial-gradient(circle at center, transparent 25%, rgba(0,0,0,0.45) 70%)',
-            pointerEvents: 'none', zIndex: 1
-          }} />
+        <div style={{ position: 'fixed', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
 
-          {/* Top bar */}
+          {/* 
+            BLACKOUT MASK: The entire screen is dark except for a "window" 
+            around the center reticle and the guidance dot area.
+            This creates the Matterport "spotlight" effect.
+          */}
           <div style={{
-            position: 'absolute', top: 0, left: 0, right: 0,
-            padding: '12px 16px 20px',
-            display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-            background: 'linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, transparent 100%)',
-            zIndex: 20, pointerEvents: 'auto'
+            position: 'absolute',
+            inset: 0,
+            background: 'rgba(0,0,0,0.75)',
+            zIndex: 2,
+            pointerEvents: 'none'
+          }}>
+            {/* Center clear window — the "looking glass" */}
+            <div style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              width: 200,
+              height: 200,
+              borderRadius: '50%',
+              background: 'transparent',
+              boxShadow: '0 0 0 9999px rgba(0,0,0,0.75)',
+            }} />
+          </div>
+
+          {/* Top bar — minimal, no heavy gradient */}
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            padding: '12px 16px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-start',
+            zIndex: 20,
+            pointerEvents: 'auto'
           }}>
             <div>
-              <div style={{ fontSize: 18, fontWeight: 600, color: '#fff', letterSpacing: '-0.3px' }}>{roomName}</div>
-              <div style={{ fontSize: 13, color: '#aaa', marginTop: 2 }}>{positionLabel}</div>
-              <div style={{ fontSize: 12, marginTop: 4, fontWeight: 500, color: isAligned ? '#34C759' : '#fff' }}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>{roomName}</div>
+              <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.8)', marginTop: 2 }}>{positionLabel}</div>
+              <div style={{
+                fontSize: 13,
+                marginTop: 4,
+                fontWeight: 500,
+                color: isAligned ? '#4CD964' : '#fff'
+              }}>
                 {guideText}
               </div>
             </div>
             <button onClick={finishCapture} style={{
-              width: 36, height: 36, borderRadius: '50%', border: 'none',
-              background: 'rgba(255,255,255,0.2)', color: '#fff', fontSize: 20,
-              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              backdropFilter: 'blur(10px)', pointerEvents: 'auto'
+              width: 36,
+              height: 36,
+              borderRadius: '50%',
+              border: 'none',
+              background: 'rgba(0,0,0,0.4)',
+              color: '#fff',
+              fontSize: 20,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
             }}>✕</button>
           </div>
 
-          {/* Progress bar */}
+          {/* Thin progress bar */}
           <div style={{
-            position: 'absolute', top: 56, left: 16, right: 16,
-            height: 4, background: 'rgba(255,255,255,0.2)', borderRadius: 2, overflow: 'hidden', zIndex: 20
+            position: 'absolute',
+            top: 72,
+            left: 16,
+            right: 60,
+            height: 3,
+            background: 'rgba(255,255,255,0.2)',
+            borderRadius: 2,
+            overflow: 'hidden',
+            zIndex: 20
           }}>
             <div style={{
-              width: `${coveragePct}%`, height: '100%', background: '#34C759', borderRadius: 2,
+              width: `${coveragePct}%`,
+              height: '100%',
+              background: '#4CD964',
+              borderRadius: 2,
               transition: 'width 0.3s ease'
             }} />
           </div>
-          <div style={{ position: 'absolute', top: 64, right: 16, fontSize: 12, color: 'rgba(255,255,255,0.7)', zIndex: 20 }}>
-            {coveragePct}%
-          </div>
-
-          {/* Center Reticle */}
           <div style={{
-            position: 'absolute', top: '50%', left: '50%',
-            transform: 'translate(-50%, -50%)', zIndex: 15, pointerEvents: 'none'
+            position: 'absolute',
+            top: 72,
+            right: 16,
+            fontSize: 13,
+            color: 'rgba(255,255,255,0.7)',
+            zIndex: 20
+          }}>{coveragePct}%</div>
+
+          {/* Center reticle — EXACT Matterport style */}
+          <div style={{
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            zIndex: 15,
+            pointerEvents: 'none'
           }}>
+            {/* Outer thin ring */}
             <div style={{
-              width: 80, height: 80, borderRadius: '50%',
-              border: '2.5px solid rgba(255,255,255,0.95)',
-              position: 'relative',
-              boxShadow: '0 0 20px rgba(255,255,255,0.15), inset 0 0 20px rgba(255,255,255,0.05)'
+              width: 70,
+              height: 70,
+              borderRadius: '50%',
+              border: '1.5px solid rgba(255,255,255,0.9)',
+              position: 'relative'
             }}>
-              {/* Crosshair horizontal */}
+              {/* Horizontal crosshair */}
               <div style={{
-                position: 'absolute', top: '50%', left: '15%', right: '15%',
-                height: 1.5, background: 'rgba(255,255,255,0.9)', transform: 'translateY(-50%)'
+                position: 'absolute',
+                top: '50%',
+                left: '25%',
+                right: '25%',
+                height: 1,
+                background: 'rgba(255,255,255,0.8)',
+                transform: 'translateY(-50%)'
               }} />
-              {/* Crosshair vertical */}
+              {/* Vertical crosshair */}
               <div style={{
-                position: 'absolute', left: '50%', top: '15%', bottom: '15%',
-                width: 1.5, background: 'rgba(255,255,255,0.9)', transform: 'translateX(-50%)'
+                position: 'absolute',
+                left: '50%',
+                top: '25%',
+                bottom: '25%',
+                width: 1,
+                background: 'rgba(255,255,255,0.8)',
+                transform: 'translateX(-50%)'
               }} />
               {/* Center dot */}
               <div style={{
-                position: 'absolute', top: '50%', left: '50%',
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
                 transform: 'translate(-50%, -50%)',
-                width: 8, height: 8, borderRadius: '50%', background: '#fff'
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: '#fff'
               }} />
             </div>
           </div>
 
-          {/* Guidance dot */}
+          {/* Guidance dot — small solid circle, NOT a ring */}
           <div id="guide-dot" style={{
-            position: 'absolute', width: 22, height: 22,
-            border: '2.5px solid #fff', borderRadius: '50%',
-            background: 'rgba(255,255,255,0.15)', zIndex: 16,
-            pointerEvents: 'none', display: 'none',
-            boxShadow: '0 0 12px rgba(255,255,255,0.3)'
+            position: 'absolute',
+            width: 16,
+            height: 16,
+            borderRadius: '50%',
+            background: 'rgba(255,255,255,0.25)',
+            border: '1.5px solid rgba(255,255,255,0.9)',
+            zIndex: 16,
+            pointerEvents: 'none',
+            display: 'none'
           }} />
 
-          {/* Dashed line */}
+          {/* Solid line (not dashed) connecting center to dot */}
           <div id="guide-line" style={{
-            position: 'absolute', height: 2,
-            background: 'repeating-linear-gradient(90deg, rgba(255,255,255,0.9) 0, rgba(255,255,255,0.9) 5px, transparent 5px, transparent 10px)',
-            zIndex: 14, pointerEvents: 'none', display: 'none',
+            position: 'absolute',
+            height: 1.5,
+            background: 'rgba(255,255,255,0.6)',
+            zIndex: 14,
+            pointerEvents: 'none',
+            display: 'none',
             transformOrigin: 'left center'
           }} />
 
           {/* Flash */}
           {flash && (
             <div style={{
-              position: 'absolute', inset: 0, background: '#fff',
-              opacity: 0.35, zIndex: 50, pointerEvents: 'none'
+              position: 'absolute',
+              inset: 0,
+              background: '#fff',
+              opacity: 0.3,
+              zIndex: 50,
+              pointerEvents: 'none'
             }} />
           )}
 
           {/* Thumbnail strip */}
           {thumbnails.length > 0 && (
             <div style={{
-              position: 'absolute', bottom: 120, left: 12,
-              display: 'flex', gap: 8, zIndex: 20,
-              overflowX: 'auto', maxWidth: '65%', padding: 4,
+              position: 'absolute',
+              bottom: 110,
+              left: 12,
+              display: 'flex',
+              gap: 6,
+              zIndex: 20,
+              overflowX: 'auto',
+              maxWidth: '55%',
+              padding: 3,
               pointerEvents: 'auto'
             }}>
               {thumbnails.map((t, i) => (
                 <div key={t.id} style={{
-                  flexShrink: 0, width: 52, height: 52,
-                  borderRadius: 8, overflow: 'hidden',
-                  border: '2px solid rgba(255,255,255,0.35)'
+                  flexShrink: 0,
+                  width: 48,
+                  height: 48,
+                  borderRadius: 6,
+                  overflow: 'hidden',
+                  border: '1.5px solid rgba(255,255,255,0.3)'
                 }}>
-                  <img src={t.url} alt={`Shot ${i+1}`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                  <img src={t.url} alt={`Shot ${i+1}`} style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    display: 'block'
+                  }} />
                 </div>
               ))}
             </div>
           )}
 
-          {/* Bottom controls */}
+          {/* Bottom controls — minimal, no heavy gradient */}
           <div style={{
-            position: 'absolute', bottom: 0, left: 0, right: 0,
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
             padding: '16px 20px 36px',
-            background: 'linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 100%)',
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            zIndex: 20, pointerEvents: 'auto'
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            zIndex: 20,
+            pointerEvents: 'auto'
           }}>
             {/* Undo */}
             <button
               onClick={undoLast}
               style={{
-                padding: '10px 16px', borderRadius: 20, border: 'none',
-                background: thumbnails.length > 0 ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.08)',
-                color: '#fff', fontSize: 15, fontWeight: 500,
+                padding: '10px 16px',
+                borderRadius: 20,
+                border: 'none',
+                background: thumbnails.length > 0 ? 'rgba(0,0,0,0.5)' : 'rgba(0,0,0,0.25)',
+                color: '#fff',
+                fontSize: 15,
+                fontWeight: 500,
                 cursor: thumbnails.length > 0 ? 'pointer' : 'default',
-                backdropFilter: 'blur(10px)', pointerEvents: thumbnails.length > 0 ? 'auto' : 'none',
-                opacity: thumbnails.length > 0 ? 1 : 0.4, transition: 'all 0.2s'
+                opacity: thumbnails.length > 0 ? 1 : 0.4,
+                pointerEvents: thumbnails.length > 0 ? 'auto' : 'none',
+                transition: 'all 0.2s'
               }}
             >↩ Undo</button>
 
-            {/* Shutter */}
+            {/* Shutter — thin ring, white fill */}
             <button
               onClick={captureFrame}
               style={{
-                width: 76, height: 76, borderRadius: '50%',
-                border: `4px solid ${isAligned ? '#34C759' : 'rgba(255,255,255,0.4)'}`,
-                background: isAligned ? 'rgba(52,199,89,0.25)' : 'rgba(255,255,255,0.12)',
-                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                padding: 0, transition: 'all 0.2s'
+                width: 68,
+                height: 68,
+                borderRadius: '50%',
+                border: `3px solid ${isAligned ? '#4CD964' : 'rgba(255,255,255,0.6)'}`,
+                background: 'transparent',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+                transition: 'all 0.2s'
               }}
             >
               <div style={{
-                width: 60, height: 60, borderRadius: '50%',
-                background: isAligned ? '#34C759' : '#fff'
+                width: 56,
+                height: 56,
+                borderRadius: '50%',
+                background: '#fff'
               }} />
             </button>
 
@@ -544,10 +554,14 @@ export default function ScanPage() {
             <button
               onClick={finishCapture}
               style={{
-                padding: '10px 18px', borderRadius: 20, border: 'none',
-                background: capturedCount >= totalNeeded ? '#34C759' : 'rgba(255,255,255,0.08)',
-                color: '#fff', fontSize: 15, fontWeight: 600,
-                cursor: 'pointer', backdropFilter: 'blur(10px)',
+                padding: '10px 18px',
+                borderRadius: 20,
+                border: 'none',
+                background: capturedCount >= totalNeeded ? '#4CD964' : 'rgba(0,0,0,0.25)',
+                color: '#fff',
+                fontSize: 15,
+                fontWeight: 600,
+                cursor: 'pointer',
                 opacity: capturedCount >= totalNeeded ? 1 : 0.4,
                 transition: 'all 0.2s'
               }}
@@ -556,45 +570,22 @@ export default function ScanPage() {
         </div>
       )}
 
-      {/* ==================== REVIEW SCREEN ==================== */}
+      {/* REVIEW SCREEN */}
       {screen === 'review' && (
-        <div style={{
-          position: 'fixed', inset: 0,
-          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)',
-          color: '#fff', zIndex: 100, overflowY: 'auto'
-        }}>
-          <div style={{
-            width: 72, height: 72, borderRadius: '50%', background: '#34C759',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 32, marginBottom: 20, color: '#fff'
-          }}>✓</div>
-          <h2 style={{ fontSize: 24, margin: '0 0 6px', fontWeight: 700 }}>Capture Complete!</h2>
-          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 24px', textAlign: 'center' }}>
-            {capturedCount} shots captured<br/>{roomName} — {positionLabel}
-          </p>
-
-          <div style={{
-            display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
-            gap: 8, maxWidth: 320, width: '100%', marginBottom: 24
-          }}>
+        <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)', color: '#fff', zIndex: 100, overflowY: 'auto' }}>
+          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#4CD964', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, marginBottom: 16, color: '#fff' }}>✓</div>
+          <h2 style={{ fontSize: 22, margin: '0 0 6px', fontWeight: 700 }}>Capture Complete!</h2>
+          <p style={{ fontSize: 13, color: '#8b949e', margin: '0 0 20px', textAlign: 'center' }}>{capturedCount} shots captured<br/>{roomName} — {positionLabel}</p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, maxWidth: 300, width: '100%', marginBottom: 20 }}>
             {thumbnails.map((t, i) => (
               <div key={t.id} style={{ aspectRatio: 1, borderRadius: 8, overflow: 'hidden', border: '1px solid #30363d' }}>
                 <img src={t.url} alt={`Shot ${i+1}`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
               </div>
             ))}
           </div>
-
-          <div style={{ width: '100%', maxWidth: 320, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <button onClick={downloadZip} style={{
-              width: '100%', padding: 16, borderRadius: 14, border: 'none',
-              background: '#00d2ff', color: '#000', fontSize: 16, fontWeight: 600, cursor: 'pointer'
-            }}>⬇ Download ZIP</button>
-            <button onClick={nextPosition} style={{
-              width: '100%', padding: 14, borderRadius: 14,
-              border: '1px solid #00d2ff', background: 'transparent',
-              color: '#00d2ff', fontSize: 16, fontWeight: 600, cursor: 'pointer'
-            }}>+ Next Position</button>
+          <div style={{ width: '100%', maxWidth: 300, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <button onClick={downloadZip} style={{ width: '100%', padding: 14, borderRadius: 14, border: 'none', background: '#00d2ff', color: '#000', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>⬇ Download ZIP</button>
+            <button onClick={nextPosition} style={{ width: '100%', padding: 12, borderRadius: 14, border: '1px solid #00d2ff', background: 'transparent', color: '#00d2ff', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>+ Next Position</button>
           </div>
         </div>
       )}

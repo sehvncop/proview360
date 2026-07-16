@@ -13,6 +13,7 @@ export default function ScanPage() {
   const [thumbnails, setThumbnails] = useState([])
   const [showUndo, setShowUndo] = useState(false)
   const [cameraError, setCameraError] = useState('')
+  const [streamReady, setStreamReady] = useState(false)
 
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
@@ -24,6 +25,7 @@ export default function ScanPage() {
   const isProcessingRef = useRef(false)
   const totalNeeded = 32
 
+  // Generate targets in a grid pattern
   const generateTargets = useCallback(() => {
     const targets = []
     for (let p = 0; p < 4; p++) {
@@ -40,13 +42,50 @@ export default function ScanPage() {
     return targets
   }, [])
 
+  // CRITICAL: Attach stream to video AFTER capture screen renders
+  useEffect(() => {
+    if (screen !== 'capture') return
+    if (!streamRef.current) return
+    if (!videoRef.current) return
+
+    const video = videoRef.current
+    const stream = streamRef.current
+
+    // iOS Safari: must set srcObject and play AFTER element is in DOM
+    video.srcObject = stream
+
+    const playVideo = async () => {
+      try {
+        await video.play()
+        setStreamReady(true)
+      } catch (e) {
+        console.log('Play failed, will retry:', e)
+        // iOS sometimes needs a second attempt
+        setTimeout(() => {
+          video.play().then(() => setStreamReady(true)).catch(console.error)
+        }, 300)
+      }
+    }
+
+    playVideo()
+
+    return () => {
+      video.pause()
+      video.srcObject = null
+    }
+  }, [screen])
+
   const startCapture = async () => {
     if (!roomName.trim()) {
       alert('Enter room name first')
       return
     }
+
     setCameraError('')
+    setStreamReady(false)
+
     try {
+      // Get camera stream FIRST, before switching screen
       const constraints = {
         video: {
           facingMode: { ideal: 'environment' },
@@ -55,30 +94,28 @@ export default function ScanPage() {
         },
         audio: false
       }
+
       const stream = await navigator.mediaDevices.getUserMedia(constraints)
       streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        try {
-          await videoRef.current.play()
-        } catch (e) {
-          setTimeout(() => {
-            if (videoRef.current) videoRef.current.play()
-          }, 200)
-        }
-      }
+
+      // NOW switch to capture screen — video element will render
+      // and the useEffect above will attach the stream
       const targets = generateTargets()
       targetQueueRef.current = targets
       shotsRef.current = []
+
       if (targets.length > 0) {
         currentTargetRef.current = targets[0]
       }
+
       setScreen('capture')
       setCapturedCount(0)
       setCoveragePct(0)
       setThumbnails([])
       setShowUndo(false)
+
     } catch (err) {
+      console.error('Camera error:', err)
       setCameraError('Camera access denied. Please allow camera in Settings > Safari > Camera')
       alert('Camera access denied. Please allow camera in Settings > Safari > Camera for this site.')
     }
@@ -87,25 +124,33 @@ export default function ScanPage() {
   const captureFrame = async () => {
     if (isProcessingRef.current) return
     isProcessingRef.current = true
+
     if (lockTimerRef.current) {
       clearTimeout(lockTimerRef.current)
       lockTimerRef.current = null
     }
+
     const video = videoRef.current
     const canvas = canvasRef.current
-    if (!video || !canvas) {
+    if (!video || !canvas || !streamReady) {
       isProcessingRef.current = false
       return
     }
+
+    // Flash effect
     setFlash(true)
     setTimeout(() => setFlash(false), 150)
+
+    // Capture frame
     canvas.width = video.videoWidth || 1920
     canvas.height = video.videoHeight || 1080
     const ctx = canvas.getContext('2d')
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+
     const blob = await new Promise(resolve => {
       canvas.toBlob(resolve, 'image/jpeg', 0.92)
     })
+
     const shot = {
       id: Date.now(),
       yaw: currentTargetRef.current.yaw,
@@ -113,21 +158,29 @@ export default function ScanPage() {
       blob: blob,
       timestamp: new Date().toISOString()
     }
+
     shotsRef.current.push(shot)
+
+    // Create thumbnail
     const thumbCanvas = document.createElement('canvas')
     thumbCanvas.width = 120
     thumbCanvas.height = 90
     const thumbCtx = thumbCanvas.getContext('2d')
     thumbCtx.drawImage(video, 0, 0, 120, 90)
     const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.5)
+
     setThumbnails(prev => [...prev, { id: shot.id, url: thumbUrl }])
     setCapturedCount(shotsRef.current.length)
     setShowUndo(true)
+
     const coverage = Math.min(100, Math.round((shotsRef.current.length / totalNeeded) * 100))
     setCoveragePct(coverage)
+
+    // Move to next target
     const queue = targetQueueRef.current
     const currentIdx = queue.findIndex(t => t.id === currentTargetRef.current.id)
     if (currentIdx >= 0) queue[currentIdx].captured = true
+
     const nextTarget = queue.find(t => !t.captured)
     if (nextTarget) {
       currentTargetRef.current = nextTarget
@@ -135,19 +188,25 @@ export default function ScanPage() {
       finishCapture()
       return
     }
+
     isProcessingRef.current = false
   }
 
   const undoLast = () => {
     if (shotsRef.current.length === 0) return
+
     const removed = shotsRef.current.pop()
+
     const queue = targetQueueRef.current
     const target = queue.find(t => t.yaw === removed.yaw && t.pitch === removed.pitch)
     if (target) target.captured = false
+
     setThumbnails(prev => prev.slice(0, -1))
     setCapturedCount(shotsRef.current.length)
     setCoveragePct(Math.round((shotsRef.current.length / totalNeeded) * 100))
+
     currentTargetRef.current = { yaw: removed.yaw, pitch: removed.pitch, captured: false, id: 'undo' }
+
     if (shotsRef.current.length === 0) setShowUndo(false)
   }
 
@@ -156,6 +215,7 @@ export default function ScanPage() {
       streamRef.current.getTracks().forEach(t => t.stop())
       streamRef.current = null
     }
+    setStreamReady(false)
     setScreen('review')
   }
 
@@ -163,6 +223,7 @@ export default function ScanPage() {
     const zip = new JSZip()
     const folderName = `${roomName.replace(/\s+/g, '_')}_${positionLabel.replace(/\s+/g, '_')}`
     const folder = zip.folder(folderName)
+
     const meta = {
       room: roomName,
       position: positionLabel,
@@ -176,10 +237,12 @@ export default function ScanPage() {
       }))
     }
     folder.file('meta.json', JSON.stringify(meta, null, 2))
+
     shotsRef.current.forEach((shot, i) => {
       const filename = `shot_${String(i+1).padStart(3, '0')}.jpg`
       folder.file(filename, shot.blob)
     })
+
     const content = await zip.generateAsync({ type: 'blob' })
     const url = URL.createObjectURL(content)
     const a = document.createElement('a')
@@ -199,9 +262,11 @@ export default function ScanPage() {
     setCapturedCount(0)
     setCoveragePct(0)
     setShowUndo(false)
+    setStreamReady(false)
     shotsRef.current = []
   }
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (streamRef.current) {
@@ -230,7 +295,41 @@ export default function ScanPage() {
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
       </Head>
+
+      {/* Hidden canvas for capture processing */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
+
+      {/* 
+        VIDEO ELEMENT - ALWAYS RENDERED but hidden when not capturing
+        This is the CRITICAL FIX for iOS Safari: the video must exist 
+        in the DOM before srcObject is assigned
+      */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        webkit-playsinline="true"
+        x5-playsinline="true"
+        disablePictureInPicture
+        controls={false}
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          objectFit: 'cover',
+          zIndex: 1,
+          background: '#000',
+          // Hide when not on capture screen
+          opacity: screen === 'capture' ? 1 : 0,
+          pointerEvents: screen === 'capture' ? 'auto' : 'none',
+          transition: 'opacity 0.3s ease'
+        }}
+      />
+
+      {/* ═══ START SCREEN ═══ */}
       {screen === 'start' && (
         <div style={{
           position: 'absolute',
@@ -355,38 +454,13 @@ export default function ScanPage() {
           </button>
         </div>
       )}
+
+      {/* ═══ CAPTURE OVERLAYS ═══ */}
       {screen === 'capture' && (
-        <div style={{ 
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: '100%',
-          height: '100%',
-          background: '#000',
-          overflow: 'hidden'
-        }}>
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            webkit-playsinline="true"
-            x5-playsinline="true"
-            disablePictureInPicture
-            controls={false}
-            style={{
-              position: 'fixed',
-              top: 0,
-              left: 0,
-              width: '100vw',
-              height: '100vh',
-              objectFit: 'cover',
-              zIndex: 1,
-              background: '#000'
-            }}
-          />
+        <>
+          {/* Coverage mask */}
           <div style={{
-            position: 'absolute',
+            position: 'fixed',
             top: 0,
             left: 0,
             width: '100%',
@@ -396,8 +470,10 @@ export default function ScanPage() {
             zIndex: 2,
             transition: 'background 0.5s ease'
           }} />
+
+          {/* Top info bar */}
           <div style={{
-            position: 'absolute',
+            position: 'fixed',
             top: 0,
             left: 0,
             right: 0,
@@ -425,8 +501,10 @@ export default function ScanPage() {
               </span>
             </div>
           </div>
+
+          {/* Progress bar */}
           <div style={{
-            position: 'absolute',
+            position: 'fixed',
             top: '56px',
             left: '16px',
             right: '16px',
@@ -444,10 +522,12 @@ export default function ScanPage() {
               transition: 'width 0.4s ease'
             }} />
           </div>
+
+          {/* X button */}
           <button
             onClick={finishCapture}
             style={{
-              position: 'absolute',
+              position: 'fixed',
               top: '16px',
               right: '16px',
               width: '36px',
@@ -467,8 +547,10 @@ export default function ScanPage() {
           >
             ✕
           </button>
+
+          {/* Center crosshair */}
           <div style={{
-            position: 'absolute',
+            position: 'fixed',
             top: '50%',
             left: '50%',
             transform: 'translate(-50%, -50%)',
@@ -506,8 +588,10 @@ export default function ScanPage() {
               background: '#fff'
             }} />
           </div>
+
+          {/* Target ring */}
           <div style={{
-            position: 'absolute',
+            position: 'fixed',
             top: '50%',
             left: '50%',
             transform: 'translate(-50%, -50%)',
@@ -531,9 +615,11 @@ export default function ScanPage() {
               background: isLocked ? '#4CAF50' : '#fff'
             }} />
           </div>
+
+          {/* Lock indicator */}
           {isLocked && (
             <div style={{
-              position: 'absolute',
+              position: 'fixed',
               top: '35%',
               left: '50%',
               transform: 'translateX(-50%)',
@@ -549,9 +635,11 @@ export default function ScanPage() {
               Ready to capture
             </div>
           )}
+
+          {/* Flash */}
           {flash && (
             <div style={{
-              position: 'absolute',
+              position: 'fixed',
               top: 0,
               left: 0,
               width: '100%',
@@ -562,8 +650,10 @@ export default function ScanPage() {
               pointerEvents: 'none'
             }} />
           )}
+
+          {/* Bottom controls */}
           <div style={{
-            position: 'absolute',
+            position: 'fixed',
             bottom: 0,
             left: 0,
             right: 0,
@@ -594,6 +684,7 @@ export default function ScanPage() {
                 ↩ Undo
               </button>
             ) : <div style={{ width: '80px' }} />}
+
             <button
               onClick={captureFrame}
               style={{
@@ -616,6 +707,7 @@ export default function ScanPage() {
                 background: '#fff'
               }} />
             </button>
+
             <button
               onClick={finishCapture}
               style={{
@@ -632,9 +724,11 @@ export default function ScanPage() {
               Done
             </button>
           </div>
+
+          {/* Thumbnails */}
           {thumbnails.length > 0 && (
             <div style={{
-              position: 'absolute',
+              position: 'fixed',
               bottom: '120px',
               left: '16px',
               right: '16px',
@@ -663,8 +757,10 @@ export default function ScanPage() {
               ))}
             </div>
           )}
-        </div>
+        </>
       )}
+
+      {/* ═══ REVIEW SCREEN ═══ */}
       {screen === 'review' && (
         <div style={{
           position: 'absolute',

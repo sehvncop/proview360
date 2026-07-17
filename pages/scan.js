@@ -12,13 +12,16 @@ export default function ScanPage() {
   const [cameraError, setCameraError] = useState('')
   const [isCapturing, setIsCapturing] = useState(false)
   const [showCaptureUI, setShowCaptureUI] = useState(false)
+  
+  // React State for the 3D camera to drive the CSS transforms smoothly
+  const [camRot, setCamRot] = useState({ pitch: 0, yaw: 0 })
 
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
   const streamRef = useRef(null)
   
-  const shotsDataRef = useRef([]) // Holds the actual blob data
-  const capturedShotsRef = useRef([]) // Holds just the IDs of captured shots
+  const shotsDataRef = useRef([]) 
+  const capturedShotsRef = useRef([]) 
   
   const isProcessingRef = useRef(false)
   const orientationRef = useRef({ alpha: 0, beta: 0, gamma: 0 })
@@ -48,9 +51,18 @@ export default function ScanPage() {
     { id: 'bottom', label: 'FLOOR',   yaw: 0,   pitch: -90 }
   ]
   const totalNeeded = SHOTS.length
+  const TOLERANCE = 12
 
   const handleOrientation = useCallback((e) => {
-    orientationRef.current = { alpha: e.alpha || 0, beta: e.beta || 0, gamma: e.gamma || 0 }
+    // FIX: Standard HTML5 alpha goes counter-clockwise. Webkit heading is clockwise.
+    // We normalize everything to a standard Clockwise Yaw (0-360)
+    let heading = 0;
+    if (e.webkitCompassHeading !== undefined) {
+      heading = e.webkitCompassHeading;
+    } else {
+      heading = 360 - (e.alpha || 0); // Convert CCW to CW
+    }
+    orientationRef.current = { alpha: heading, beta: e.beta || 0, gamma: e.gamma || 0 }
   }, [])
 
   const requestOrientation = async () => {
@@ -89,7 +101,7 @@ export default function ScanPage() {
     }
   }
 
-  // --- AR ENGINE: The magic happens here ---
+  // --- AR ENGINE (3D SPHERE CALCULATION) ---
   const updateGuidance = useCallback(() => {
     if (!showCaptureUI) return
     if (initialAlphaRef.current === null) return
@@ -103,51 +115,40 @@ export default function ScanPage() {
     // Normalize pitch: beta 90 is horizon
     const currentPitch = 90 - o.beta
     
-    const cx = window.innerWidth / 2
-    const cy = window.innerHeight / 2
-    
-    // Approximate pixels per degree
-    const ppdY = window.innerHeight / 65
-    const ppdX = window.innerWidth / 50
+    // Update the 3D scene camera rotation
+    setCamRot({ pitch: currentPitch, yaw: currentYaw })
     
     let targetInCrosshair = null
 
     SHOTS.forEach(target => {
+      // Hide if already captured
+      if (capturedShotsRef.current.includes(target.id)) return
+      
+      const yawDiff = Math.abs(getSignedDiff(target.yaw, currentYaw))
+      const pitchDiff = Math.abs(target.pitch - currentPitch)
+
+      // Gimbal lock prevention at poles
+      let aligned = false;
+      if (Math.abs(target.pitch) >= 80) {
+        aligned = pitchDiff < TOLERANCE;
+      } else {
+        aligned = yawDiff < TOLERANCE && pitchDiff < TOLERANCE;
+      }
+      
+      if (aligned) {
+        targetInCrosshair = target
+      }
+    })
+
+    // Update UI elements based on captured status
+    SHOTS.forEach(target => {
       const dotEl = document.getElementById(`dot-${target.id}`)
       if (!dotEl) return
       
-      // Hide if already captured
-      if (capturedShotsRef.current.includes(target.id)) {
-        dotEl.style.display = 'none'
-        return
-      }
-      
-      let dx = 0
-      let dy = 0
-
-      // Handle poles (ceiling/floor) perfectly without gimbal lock
-      if (Math.abs(target.pitch) === 90) {
-         dy = -(target.pitch - currentPitch) * ppdY
-         dx = 0 // Ceiling/Floor are always directly vertically aligned with center
+      if (capturedShotsRef.current.includes(target.id) || (targetInCrosshair && targetInCrosshair.id === target.id)) {
+        dotEl.style.opacity = '0'
       } else {
-         const yawDiff = getSignedDiff(target.yaw, currentYaw)
-         dx = yawDiff * ppdX
-         dy = -(target.pitch - currentPitch) * ppdY
-      }
-      
-      const dist = Math.hypot(dx, dy)
-      
-      if (dist < 40) {
-        // Locked inside crosshair!
-        targetInCrosshair = target
-        dotEl.style.display = 'none' 
-      } else if (Math.abs(dx) > cx * 1.5 || Math.abs(dy) > cy * 1.5) {
-        // Off screen
-        dotEl.style.display = 'none'
-      } else {
-        // Render hovering AR dot
-        dotEl.style.display = 'block'
-        dotEl.style.transform = `translate(${cx + dx - 20}px, ${cy + dy - 20}px)`
+        dotEl.style.opacity = '1'
       }
     })
 
@@ -206,7 +207,7 @@ export default function ScanPage() {
       shotsDataRef.current = []
       capturedShotsRef.current = []
       
-      // Auto-Calibrate Gyro
+      // Auto-Calibrate Gyro (locks current physical direction to FRONT)
       initialAlphaRef.current = orientationRef.current.alpha
 
       setScreen('capture')
@@ -219,7 +220,6 @@ export default function ScanPage() {
     }
   }
 
-  // Passing the specific target that triggered the shot
   const captureFrame = async (target) => {
     isProcessingRef.current = true
     const video = videoRef.current
@@ -326,11 +326,12 @@ export default function ScanPage() {
   return (
     <div style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', background: '#000', overflow: 'hidden', margin: 0, padding: 0, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
       <Head>
-        <title>ProView360 - AR Scan</title>
+        <title>ProView360 - True AR Scan</title>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
       </Head>
+      
       <canvas ref={canvasRef} style={{ display: 'none' }} />
       <video ref={videoRef} autoPlay playsInline muted disablePictureInPicture controls={false}
         style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', objectFit: 'cover', opacity: screen === 'capture' ? 1 : 0, zIndex: 1, pointerEvents: 'none', background: '#000' }} />
@@ -339,20 +340,23 @@ export default function ScanPage() {
         <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)', color: '#fff', zIndex: 100, overflowY: 'auto' }}>
           <div style={{ width: 72, height: 72, borderRadius: 18, background: 'linear-gradient(135deg, #00d2ff, #3a7bd5)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, marginBottom: 20, boxShadow: '0 8px 32px rgba(0,210,255,0.3)' }}>AR</div>
           <h1 style={{ fontSize: 26, margin: '0 0 6px', fontWeight: 700 }}>ProView360 AR</h1>
-          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>Auto-calibrated spherical capture</p>
+          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>True 3D Spherical Capture</p>
+          
           <div style={{ width: '100%', maxWidth: 340 }}>
             <label style={{ fontSize: 12, color: '#8b949e', display: 'block', marginBottom: 6, fontWeight: 500 }}>Room Name</label>
             <input type="text" value={roomName} onChange={e => setRoomName(e.target.value)} placeholder="e.g. Living Room" style={{ width: '100%', padding: '14px 16px', borderRadius: 12, border: '1px solid #30363d', background: '#0d1117', color: '#fff', fontSize: 16, marginBottom: 16, outline: 'none', boxSizing: 'border-box' }} />
             <label style={{ fontSize: 12, color: '#8b949e', display: 'block', marginBottom: 6, fontWeight: 500 }}>Position Label</label>
             <input type="text" value={positionLabel} onChange={e => setPositionLabel(e.target.value)} placeholder="e.g. Position 1" style={{ width: '100%', padding: '14px 16px', borderRadius: 12, border: '1px solid #30363d', background: '#0d1117', color: '#fff', fontSize: 16, marginBottom: 24, outline: 'none', boxSizing: 'border-box' }} />
           </div>
+          
           <div style={{ background: 'rgba(48,54,61,0.4)', borderRadius: 12, padding: 16, marginBottom: 24, maxWidth: 340, width: '100%', border: '1px solid #30363d', fontSize: 13, color: '#c9d1d9', lineHeight: 1.7 }}>
             <strong style={{ color: '#fff' }}>How to scan (18 Shots):</strong><br/>
             1. Stand in center. Hold phone upright.<br/>
-            2. Tap Start. This direction locks as FRONT.<br/>
-            3. Pan to find yellow AR dots in the room.<br/>
+            2. Tap Start. This locks your initial grid.<br/>
+            3. Pan the camera to collect the 3D dots.<br/>
             4. Hover crosshair on a dot for 1 second.
           </div>
+          
           {cameraError && <p style={{ fontSize: 12, color: '#ff6b6b', marginBottom: 12, textAlign: 'center', maxWidth: 340 }}>{cameraError}</p>}
           <button onClick={startCapture} disabled={isCapturing} style={{ width: '100%', maxWidth: 340, padding: 16, borderRadius: 14, border: 'none', background: isCapturing ? '#30363d' : '#00d2ff', color: isCapturing ? '#8b949e' : '#000', fontSize: 17, fontWeight: 600, cursor: isCapturing ? 'wait' : 'pointer', boxShadow: isCapturing ? 'none' : '0 4px 20px rgba(0,210,255,0.3)' }}>{isCapturing ? 'Starting...' : 'Start AR Scan'}</button>
         </div>
@@ -361,21 +365,46 @@ export default function ScanPage() {
       {showCaptureUI && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
           
-          {/* AR Floating Dots Container */}
-          <div id="ar-dots-container" style={{ position: 'absolute', inset: 0, zIndex: 12, pointerEvents: 'none' }}>
-            {SHOTS.map(s => (
-              <div key={s.id} id={`dot-${s.id}`} style={{
-                position: 'absolute',
-                top: 0, left: 0, 
-                width: 40, height: 40,
-                borderRadius: '50%',
-                background: 'rgba(255, 204, 0, 0.75)', // Yellow AR dot
-                border: '2px solid rgba(255,255,255,0.4)',
-                display: 'none', // Hidden initially
-              }} />
-            ))}
+          {/* ========================================================= */}
+          {/* TRUE 3D CSS SPHERE: This fixes the "running dots" issue! */}
+          <div style={{ 
+            position: 'absolute', inset: 0, 
+            perspective: '600px', // Creates the 3D depth field
+            zIndex: 12, pointerEvents: 'none', overflow: 'hidden' 
+          }}>
+            {/* The 3D Camera Container. It rotates OPPOSITE to your phone's movement */}
+            <div style={{
+              position: 'absolute', top: '50%', left: '50%',
+              transformStyle: 'preserve-3d',
+              transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)`
+            }}>
+              
+              {/* Render all 18 dots at their physical 3D coordinates */}
+              {SHOTS.map(s => (
+                <div key={s.id} style={{
+                  position: 'absolute',
+                  transformStyle: 'preserve-3d',
+                  // Push the dot 500px away into physical space, then rotate it to its spot
+                  transform: `rotateY(${s.yaw}deg) rotateX(${-s.pitch}deg) translateZ(-500px)`,
+                }}>
+                  {/* The actual yellow circle */}
+                  <div id={`dot-${s.id}`} style={{
+                    width: 44, height: 44,
+                    background: 'rgba(255, 204, 0, 0.9)',
+                    borderRadius: '50%',
+                    border: '2px solid rgba(255,255,255,0.5)',
+                    // Center the circle on its coordinate and rotate it to face the camera
+                    transform: 'translate(-50%, -50%)',
+                    transition: 'opacity 0.2s ease',
+                    opacity: 1 // Managed by the React loop
+                  }} />
+                </div>
+              ))}
+            </div>
           </div>
+          {/* ========================================================= */}
 
+          {/* Blackout Vignette */}
           <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 2, pointerEvents: 'none' }}>
             <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 220, height: 220, borderRadius: '50%', background: 'transparent', boxShadow: '0 0 0 9999px rgba(0,0,0,0.7)' }} />
           </div>
@@ -393,15 +422,10 @@ export default function ScanPage() {
           </div>
           <div style={{ position: 'absolute', top: 66, right: 16, fontSize: 13, color: 'rgba(255,255,255,0.7)', zIndex: 20 }}>{coveragePct}%</div>
 
-          {/* Center Reticle / Timer */}
+          {/* Center Reticle & Timer */}
           <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 15, pointerEvents: 'none' }}>
             <div id="center-reticle" style={{
-              width: 70,
-              height: 70,
-              borderRadius: '50%',
-              border: '2px solid rgba(255,255,255,0.9)',
-              position: 'relative',
-              background: 'transparent', // Will be overridden by conic-gradient timer
+              width: 70, height: 70, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.9)', position: 'relative', background: 'transparent'
             }}>
               <div style={{ position: 'absolute', top: '50%', left: '25%', right: '25%', height: 1, background: 'rgba(255,255,255,0.8)', transform: 'translateY(-50%)' }} />
               <div style={{ position: 'absolute', left: '50%', top: '25%', bottom: '25%', width: 1, background: 'rgba(255,255,255,0.8)', transform: 'translateX(-50%)' }} />
@@ -422,27 +446,8 @@ export default function ScanPage() {
           )}
 
           <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, padding: '16px 20px 36px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 20, pointerEvents: 'auto' }}>
-            <button
-              onClick={undoLast}
-              style={{
-                padding: '10px 16px', borderRadius: 20, border: 'none',
-                background: thumbnails.length > 0 ? 'rgba(0,0,0,0.5)' : 'rgba(0,0,0,0.25)',
-                color: '#fff', fontSize: 15, fontWeight: 500,
-                cursor: thumbnails.length > 0 ? 'pointer' : 'default',
-                opacity: thumbnails.length > 0 ? 1 : 0.4,
-                pointerEvents: thumbnails.length > 0 ? 'auto' : 'none'
-              }}
-            >↩ Undo</button>
-
-            <button
-              onClick={finishCapture}
-              style={{
-                padding: '10px 18px', borderRadius: 20, border: 'none',
-                background: capturedCount >= totalNeeded ? '#4CD964' : 'rgba(0,0,0,0.25)',
-                color: '#fff', fontSize: 15, fontWeight: 600, cursor: 'pointer',
-                opacity: capturedCount >= totalNeeded ? 1 : 0.4
-              }}
-            >Done</button>
+            <button onClick={undoLast} style={{ padding: '10px 16px', borderRadius: 20, border: 'none', background: thumbnails.length > 0 ? 'rgba(0,0,0,0.5)' : 'rgba(0,0,0,0.25)', color: '#fff', fontSize: 15, fontWeight: 500, cursor: thumbnails.length > 0 ? 'pointer' : 'default', opacity: thumbnails.length > 0 ? 1 : 0.4, pointerEvents: thumbnails.length > 0 ? 'auto' : 'none' }}>↩ Undo</button>
+            <button onClick={finishCapture} style={{ padding: '10px 18px', borderRadius: 20, border: 'none', background: capturedCount >= totalNeeded ? '#4CD964' : 'rgba(0,0,0,0.25)', color: '#fff', fontSize: 15, fontWeight: 600, cursor: 'pointer', opacity: capturedCount >= totalNeeded ? 1 : 0.4 }}>Done</button>
           </div>
         </div>
       )}

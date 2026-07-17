@@ -59,9 +59,9 @@ export default function ViewPage() {
 
   // Initialize Pannellum when ready
   useEffect(() => {
-    if (!pannellumReady || !listing || !listing.rooms) return
+    if (!pannellumReady || !listing || (!listing.rooms && !listing.shots)) return
 
-    const rooms = listing.rooms
+    const rooms = listing.rooms || (listing.shots ? listing.shots.map((s, i) => ({ name: s.name || `Room ${i+1}`, panorama_url: s.url })) : [])
     if (!rooms || rooms.length === 0) return
 
     const current = rooms[currentRoom]
@@ -143,7 +143,7 @@ export default function ViewPage() {
     )
   }
 
-  const rooms = listing.rooms || []
+  const rooms = listing.rooms || (listing.shots ? listing.shots.map((s, i) => ({ name: s.name || `Room ${i+1}`, panorama_url: s.url })) : [])
 
   return (
     <div style={styles.container}>

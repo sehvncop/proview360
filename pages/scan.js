@@ -12,6 +12,7 @@ export default function ScanPage() {
   const [cameraError, setCameraError] = useState('')
   const [isCapturing, setIsCapturing] = useState(false)
   const [showCaptureUI, setShowCaptureUI] = useState(false)
+  const [showTiltWarning, setShowTiltWarning] = useState(false)
   
   // React State for the 3D camera to drive the CSS transforms smoothly
   const [camRot, setCamRot] = useState({ pitch: 0, yaw: 0 })
@@ -51,16 +52,16 @@ export default function ScanPage() {
     { id: 'bottom', label: 'FLOOR',   yaw: 0,   pitch: -90 }
   ]
   const totalNeeded = SHOTS.length
-  const TOLERANCE = 12
+  
+  // FORTIFIED: Much tighter tolerance (was 12)
+  const TOLERANCE = 5 
 
   const handleOrientation = useCallback((e) => {
-    // FIX: Standard HTML5 alpha goes counter-clockwise. Webkit heading is clockwise.
-    // We normalize everything to a standard Clockwise Yaw (0-360)
     let heading = 0;
     if (e.webkitCompassHeading !== undefined) {
       heading = e.webkitCompassHeading;
     } else {
-      heading = 360 - (e.alpha || 0); // Convert CCW to CW
+      heading = 360 - (e.alpha || 0);
     }
     orientationRef.current = { alpha: heading, beta: e.beta || 0, gamma: e.gamma || 0 }
   }, [])
@@ -115,6 +116,11 @@ export default function ScanPage() {
     // Normalize pitch: beta 90 is horizon
     const currentPitch = 90 - o.beta
     
+    // FORTIFIED: Ensure phone is in PORTRAIT orientation!
+    // Gamma is near 0 in perfect portrait. If they tilt to landscape, it goes to 90 or -90.
+    const isPortrait = Math.abs(o.gamma) < 25
+    setShowTiltWarning(!isPortrait)
+    
     // Update the 3D scene camera rotation
     setCamRot({ pitch: currentPitch, yaw: currentYaw })
     
@@ -152,8 +158,8 @@ export default function ScanPage() {
       }
     })
 
-    // Stabilization Timer Logic
-    if (targetInCrosshair) {
+    // Stabilization Timer Logic (ONLY fires if Portrait)
+    if (targetInCrosshair && isPortrait) {
       if (!hoverStartRef.current) {
         hoverStartRef.current = Date.now()
       } else {
@@ -365,44 +371,44 @@ export default function ScanPage() {
       {showCaptureUI && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
           
-          {/* ========================================================= */}
-          {/* TRUE 3D CSS SPHERE: This fixes the "running dots" issue! */}
+          {showTiltWarning && (
+            <div style={{ position: 'absolute', top: '15%', left: 0, right: 0, textAlign: 'center', zIndex: 100 }}>
+              <div style={{ display: 'inline-block', background: 'rgba(255,50,50,0.9)', color: '#fff', padding: '12px 24px', borderRadius: 30, fontSize: 18, fontWeight: 800, letterSpacing: 1, boxShadow: '0 4px 20px rgba(255,0,0,0.5)' }}>
+                ⚠️ HOLD PHONE UPRIGHT
+              </div>
+            </div>
+          )}
+
+          {/* TRUE 3D CSS SPHERE */}
           <div style={{ 
             position: 'absolute', inset: 0, 
-            perspective: '600px', // Creates the 3D depth field
+            perspective: '600px',
             zIndex: 12, pointerEvents: 'none', overflow: 'hidden' 
           }}>
-            {/* The 3D Camera Container. It rotates OPPOSITE to your phone's movement */}
             <div style={{
               position: 'absolute', top: '50%', left: '50%',
               transformStyle: 'preserve-3d',
               transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)`
             }}>
-              
-              {/* Render all 18 dots at their physical 3D coordinates */}
               {SHOTS.map(s => (
                 <div key={s.id} style={{
                   position: 'absolute',
                   transformStyle: 'preserve-3d',
-                  // Push the dot 500px away into physical space, then rotate it to its spot
                   transform: `rotateY(${s.yaw}deg) rotateX(${-s.pitch}deg) translateZ(-500px)`,
                 }}>
-                  {/* The actual yellow circle */}
                   <div id={`dot-${s.id}`} style={{
                     width: 44, height: 44,
                     background: 'rgba(255, 204, 0, 0.9)',
                     borderRadius: '50%',
                     border: '2px solid rgba(255,255,255,0.5)',
-                    // Center the circle on its coordinate and rotate it to face the camera
                     transform: 'translate(-50%, -50%)',
                     transition: 'opacity 0.2s ease',
-                    opacity: 1 // Managed by the React loop
+                    opacity: 1
                   }} />
                 </div>
               ))}
             </div>
           </div>
-          {/* ========================================================= */}
 
           {/* Blackout Vignette */}
           <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 2, pointerEvents: 'none' }}>
@@ -422,14 +428,14 @@ export default function ScanPage() {
           </div>
           <div style={{ position: 'absolute', top: 66, right: 16, fontSize: 13, color: 'rgba(255,255,255,0.7)', zIndex: 20 }}>{coveragePct}%</div>
 
-          {/* Center Reticle & Timer */}
+          {/* FORTIFIED: MICRO-RETICLE */}
           <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 15, pointerEvents: 'none' }}>
             <div id="center-reticle" style={{
-              width: 70, height: 70, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.9)', position: 'relative', background: 'transparent'
+              width: 44, height: 44, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.9)', position: 'relative', background: 'transparent'
             }}>
-              <div style={{ position: 'absolute', top: '50%', left: '25%', right: '25%', height: 1, background: 'rgba(255,255,255,0.8)', transform: 'translateY(-50%)' }} />
-              <div style={{ position: 'absolute', left: '50%', top: '25%', bottom: '25%', width: 1, background: 'rgba(255,255,255,0.8)', transform: 'translateX(-50%)' }} />
-              <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 6, height: 6, borderRadius: '50%', background: '#fff' }} />
+              <div style={{ position: 'absolute', top: '50%', left: '10%', right: '10%', height: 1, background: 'rgba(255,255,255,0.8)', transform: 'translateY(-50%)' }} />
+              <div style={{ position: 'absolute', left: '50%', top: '10%', bottom: '10%', width: 1, background: 'rgba(255,255,255,0.8)', transform: 'translateX(-50%)' }} />
+              <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 4, height: 4, borderRadius: '50%', background: '#fff' }} />
             </div>
           </div>
 

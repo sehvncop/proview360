@@ -6,15 +6,15 @@ export default function ScanPage() {
   const [screen, setScreen] = useState('start')
   const [roomName, setRoomName] = useState('')
   const [positionLabel, setPositionLabel] = useState('Position 1')
-  const [capturedCount, setCapturedCount] = useState(0)
+  
+  const [paintedImages, setPaintedImages] = useState([])
   const [flash, setFlash] = useState(false)
-  const [thumbnails, setThumbnails] = useState([])
   const [cameraError, setCameraError] = useState('')
   const [isCapturing, setIsCapturing] = useState(false)
   const [showCaptureUI, setShowCaptureUI] = useState(false)
   const [showTiltWarning, setShowTiltWarning] = useState(false)
   
-  // React State for the 3D camera to drive the CSS transforms smoothly
+  // React State for the 3D camera
   const [camRot, setCamRot] = useState({ pitch: 0, yaw: 0 })
 
   const videoRef = useRef(null)
@@ -22,7 +22,6 @@ export default function ScanPage() {
   const streamRef = useRef(null)
   
   const shotsDataRef = useRef([]) 
-  const capturedShotsRef = useRef([]) 
   
   const isProcessingRef = useRef(false)
   const orientationRef = useRef({ alpha: 0, beta: 0, gamma: 0 })
@@ -30,7 +29,7 @@ export default function ScanPage() {
   const hoverStartRef = useRef(null)
   const rafRef = useRef(null)
 
-  // 18-SHOT FULL SPHERE GRID (Matterport Equivalent)
+  // 18-SHOT FULL SPHERE GRID
   const SHOTS = [
     { id: 'h1', label: 'FRONT',       yaw: 0,   pitch: 0 },
     { id: 'h2', label: 'FRONT-RIGHT', yaw: 45,  pitch: 0 },
@@ -53,7 +52,7 @@ export default function ScanPage() {
   ]
   const totalNeeded = SHOTS.length
   
-  // FORTIFIED: Much tighter tolerance (was 12)
+  // FORTIFIED: Tight tolerance
   const TOLERANCE = 5 
 
   const handleOrientation = useCallback((e) => {
@@ -93,47 +92,38 @@ export default function ScanPage() {
     if (!reticle) return
     
     if (isActive) {
-       reticle.style.borderColor = '#4CD964'
+       reticle.style.borderColor = '#00D859'
        const deg = progress * 360
-       reticle.style.background = `conic-gradient(#4CD964 ${deg}deg, transparent ${deg}deg)`
+       reticle.style.background = `conic-gradient(#00D859 ${deg}deg, transparent ${deg}deg)`
     } else {
-       reticle.style.borderColor = 'rgba(255,255,255,0.9)'
+       reticle.style.borderColor = '#fff'
        reticle.style.background = 'transparent'
     }
   }
 
-  // --- AR ENGINE (3D SPHERE CALCULATION) ---
   const updateGuidance = useCallback(() => {
     if (!showCaptureUI) return
     if (initialAlphaRef.current === null) return
     if (isProcessingRef.current) return
 
     const o = orientationRef.current
-    
-    // Auto-calibrated yaw: 0 is exactly where you pointed when you clicked start!
     const currentYaw = (o.alpha - initialAlphaRef.current + 360) % 360
-    
-    // Normalize pitch: beta 90 is horizon
     const currentPitch = 90 - o.beta
     
-    // FORTIFIED: Ensure phone is in PORTRAIT orientation!
-    // Gamma is near 0 in perfect portrait. If they tilt to landscape, it goes to 90 or -90.
     const isPortrait = Math.abs(o.gamma) < 25
     setShowTiltWarning(!isPortrait)
     
-    // Update the 3D scene camera rotation
     setCamRot({ pitch: currentPitch, yaw: currentYaw })
     
     let targetInCrosshair = null
 
     SHOTS.forEach(target => {
-      // Hide if already captured
-      if (capturedShotsRef.current.includes(target.id)) return
+      // Check if already captured in state
+      if (paintedImages.find(p => p.id === target.id)) return
       
       const yawDiff = Math.abs(getSignedDiff(target.yaw, currentYaw))
       const pitchDiff = Math.abs(target.pitch - currentPitch)
 
-      // Gimbal lock prevention at poles
       let aligned = false;
       if (Math.abs(target.pitch) >= 80) {
         aligned = pitchDiff < TOLERANCE;
@@ -146,25 +136,12 @@ export default function ScanPage() {
       }
     })
 
-    // Update UI elements based on captured status
-    SHOTS.forEach(target => {
-      const dotEl = document.getElementById(`dot-${target.id}`)
-      if (!dotEl) return
-      
-      if (capturedShotsRef.current.includes(target.id) || (targetInCrosshair && targetInCrosshair.id === target.id)) {
-        dotEl.style.opacity = '0'
-      } else {
-        dotEl.style.opacity = '1'
-      }
-    })
-
-    // Stabilization Timer Logic (ONLY fires if Portrait)
     if (targetInCrosshair && isPortrait) {
       if (!hoverStartRef.current) {
         hoverStartRef.current = Date.now()
       } else {
         const elapsed = Date.now() - hoverStartRef.current
-        const progress = Math.min(1, elapsed / 1000) // 1 second hold
+        const progress = Math.min(1, elapsed / 1000) 
         
         updateCrosshairUI(true, progress)
         
@@ -179,7 +156,7 @@ export default function ScanPage() {
       updateCrosshairUI(false, 0)
     }
 
-  }, [showCaptureUI])
+  }, [showCaptureUI, paintedImages])
 
   useEffect(() => {
     if (!showCaptureUI) return
@@ -211,15 +188,12 @@ export default function ScanPage() {
       streamRef.current = stream
       
       shotsDataRef.current = []
-      capturedShotsRef.current = []
+      setPaintedImages([])
       
-      // Auto-Calibrate Gyro (locks current physical direction to FRONT)
       initialAlphaRef.current = orientationRef.current.alpha
 
       setScreen('capture')
       setShowCaptureUI(true)
-      setCapturedCount(0)
-      setThumbnails([])
     } catch (err) {
       setCameraError('Camera access denied')
       setIsCapturing(false)
@@ -239,6 +213,7 @@ export default function ScanPage() {
     canvas.height = video.videoHeight || 1080
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+    const url = URL.createObjectURL(blob)
     
     const shotData = {
       id: target.id, yaw: target.yaw, pitch: target.pitch,
@@ -246,17 +221,9 @@ export default function ScanPage() {
     }
     
     shotsDataRef.current.push(shotData)
-    capturedShotsRef.current.push(target.id)
-
-    const thumbCanvas = document.createElement('canvas')
-    thumbCanvas.width = 120; thumbCanvas.height = 90
-    thumbCanvas.getContext('2d').drawImage(video, 0, 0, 120, 90)
-    const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.6)
-
-    setThumbnails(prev => [...prev, { id: target.id, url: thumbUrl }])
     
-    const count = capturedShotsRef.current.length
-    setCapturedCount(count)
+    const newPaintedImages = [...paintedImages, { id: target.id, url, yaw: target.yaw, pitch: target.pitch }]
+    setPaintedImages(newPaintedImages)
     
     try {
       const audio = new Audio('https://actions.google.com/sounds/v1/doors/wood_door_open.ogg')
@@ -264,7 +231,7 @@ export default function ScanPage() {
       audio.play().catch(()=>{})
     } catch(e) {}
 
-    if (count >= totalNeeded) {
+    if (newPaintedImages.length >= totalNeeded) {
       setTimeout(() => finishCapture(), 400)
     } else {
       isProcessingRef.current = false
@@ -273,10 +240,13 @@ export default function ScanPage() {
 
   const undoLast = () => {
     if (shotsDataRef.current.length === 0) return
-    const removed = shotsDataRef.current.pop()
-    capturedShotsRef.current = capturedShotsRef.current.filter(id => id !== removed.id)
-    setThumbnails(prev => prev.slice(0, -1))
-    setCapturedCount(capturedShotsRef.current.length)
+    shotsDataRef.current.pop()
+    setPaintedImages(prev => {
+       const newArr = [...prev];
+       const removedImg = newArr.pop();
+       URL.revokeObjectURL(removedImg.url);
+       return newArr;
+    });
   }
 
   const finishCapture = () => {
@@ -300,7 +270,6 @@ export default function ScanPage() {
       }))
     }, null, 2))
     
-    // Matterport spoof metafile
     folder.file('metafile.json', JSON.stringify({ platform: 'web', create_date: new Date().toISOString(), app_version: '2.0.0' }, null, 2))
     
     shotsDataRef.current.forEach((shot, i) => folder.file(`shot_${String(i + 1).padStart(3, '0')}.jpg`, shot.blob))
@@ -315,8 +284,8 @@ export default function ScanPage() {
     const nextNum = parseInt(positionLabel.replace(/\D/g, '')) + 1
     setPositionLabel(`Position ${nextNum}`)
     setScreen('start')
-    setThumbnails([]); setCapturedCount(0)
-    shotsDataRef.current = []; capturedShotsRef.current = []
+    setPaintedImages([])
+    shotsDataRef.current = []
   }
 
   useEffect(() => {
@@ -326,8 +295,6 @@ export default function ScanPage() {
       window.removeEventListener('deviceorientation', handleOrientation)
     }
   }, [handleOrientation])
-
-  const coveragePct = Math.min(100, Math.round((capturedCount / totalNeeded) * 100))
 
   return (
     <div style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', background: '#000', overflow: 'hidden', margin: 0, padding: 0, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
@@ -339,8 +306,6 @@ export default function ScanPage() {
       </Head>
       
       <canvas ref={canvasRef} style={{ display: 'none' }} />
-      <video ref={videoRef} autoPlay playsInline muted disablePictureInPicture controls={false}
-        style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', objectFit: 'cover', opacity: screen === 'capture' ? 1 : 0, zIndex: 1, pointerEvents: 'none', background: '#000' }} />
 
       {screen === 'start' && (
         <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)', color: '#fff', zIndex: 100, overflowY: 'auto' }}>
@@ -355,106 +320,120 @@ export default function ScanPage() {
             <input type="text" value={positionLabel} onChange={e => setPositionLabel(e.target.value)} placeholder="e.g. Position 1" style={{ width: '100%', padding: '14px 16px', borderRadius: 12, border: '1px solid #30363d', background: '#0d1117', color: '#fff', fontSize: 16, marginBottom: 24, outline: 'none', boxSizing: 'border-box' }} />
           </div>
           
-          <div style={{ background: 'rgba(48,54,61,0.4)', borderRadius: 12, padding: 16, marginBottom: 24, maxWidth: 340, width: '100%', border: '1px solid #30363d', fontSize: 13, color: '#c9d1d9', lineHeight: 1.7 }}>
-            <strong style={{ color: '#fff' }}>How to scan (18 Shots):</strong><br/>
-            1. Stand in center. Hold phone upright.<br/>
-            2. Tap Start. This locks your initial grid.<br/>
-            3. Pan the camera to collect the 3D dots.<br/>
-            4. Hover crosshair on a dot for 1 second.
-          </div>
-          
-          {cameraError && <p style={{ fontSize: 12, color: '#ff6b6b', marginBottom: 12, textAlign: 'center', maxWidth: 340 }}>{cameraError}</p>}
           <button onClick={startCapture} disabled={isCapturing} style={{ width: '100%', maxWidth: 340, padding: 16, borderRadius: 14, border: 'none', background: isCapturing ? '#30363d' : '#00d2ff', color: isCapturing ? '#8b949e' : '#000', fontSize: 17, fontWeight: 600, cursor: isCapturing ? 'wait' : 'pointer', boxShadow: isCapturing ? 'none' : '0 4px 20px rgba(0,210,255,0.3)' }}>{isCapturing ? 'Starting...' : 'Start AR Scan'}</button>
         </div>
       )}
 
       {showCaptureUI && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
-          
-          {showTiltWarning && (
-            <div style={{ position: 'absolute', top: '15%', left: 0, right: 0, textAlign: 'center', zIndex: 100 }}>
-              <div style={{ display: 'inline-block', background: 'rgba(255,50,50,0.9)', color: '#fff', padding: '12px 24px', borderRadius: 30, fontSize: 18, fontWeight: 800, letterSpacing: 1, boxShadow: '0 4px 20px rgba(255,0,0,0.5)' }}>
-                ⚠️ HOLD PHONE UPRIGHT
+        <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
+           
+           {/* LAYER 1: Painted Sphere (Captured Images in 3D Space) */}
+           <div style={{ position: 'absolute', inset: 0, perspective: '600px', zIndex: 1 }}>
+              <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
+                {paintedImages.map(img => (
+                  <div key={`paint-${img.id}`} style={{
+                    position: 'absolute', transformStyle: 'preserve-3d',
+                    transform: `rotateY(${img.yaw}deg) rotateX(${-img.pitch}deg) translateZ(-500px)`
+                  }}>
+                     <img src={img.url} style={{
+                        width: 640, height: 1137, // Approximate phone FOV scaled to 500px depth
+                        transform: 'translate(-50%, -50%)',
+                        objectFit: 'cover', opacity: 0.6,
+                        boxShadow: '0 0 40px rgba(0,0,0,0.9)' // Blends edges softly into the dark void
+                     }} />
+                  </div>
+                ))}
               </div>
-            </div>
-          )}
+           </div>
 
-          {/* TRUE 3D CSS SPHERE */}
-          <div style={{ 
-            position: 'absolute', inset: 0, 
-            perspective: '600px',
-            zIndex: 12, pointerEvents: 'none', overflow: 'hidden' 
-          }}>
-            <div style={{
-              position: 'absolute', top: '50%', left: '50%',
-              transformStyle: 'preserve-3d',
-              transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)`
-            }}>
-              {SHOTS.map(s => (
-                <div key={s.id} style={{
-                  position: 'absolute',
-                  transformStyle: 'preserve-3d',
-                  transform: `rotateY(${s.yaw}deg) rotateX(${-s.pitch}deg) translateZ(-500px)`,
-                }}>
-                  <div id={`dot-${s.id}`} style={{
-                    width: 44, height: 44,
-                    background: 'rgba(255, 204, 0, 0.9)',
-                    borderRadius: '50%',
-                    border: '2px solid rgba(255,255,255,0.5)',
-                    transform: 'translate(-50%, -50%)',
-                    transition: 'opacity 0.2s ease',
-                    opacity: 1
-                  }} />
-                </div>
-              ))}
-            </div>
-          </div>
+           {/* LAYER 2: Live Viewport Box (Floating in Center) */}
+           <div style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ 
+                 width: '75%', maxWidth: 360, aspectRatio: '3/4', 
+                 border: '1px solid rgba(255,255,255,0.7)', borderRadius: 2, 
+                 position: 'relative', overflow: 'hidden',
+                 boxShadow: '0 0 0 9999px rgba(0,0,0,0.85)' // Dim the painted world outside the box
+              }}>
+                 <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                 
+                 {/* Center Reticle */}
+                 <div id="center-reticle" style={{
+                    position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+                    width: 64, height: 64, borderRadius: '50%', border: '4px solid #fff',
+                    transition: 'all 0.2s ease', background: 'transparent'
+                 }} />
+                 
+                 {flash && <div style={{ position: 'absolute', inset: 0, background: '#fff', zIndex: 50 }} />}
+              </div>
+           </div>
 
-          {/* Blackout Vignette */}
-          <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 2, pointerEvents: 'none' }}>
-            <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 220, height: 220, borderRadius: '50%', background: 'transparent', boxShadow: '0 0 0 9999px rgba(0,0,0,0.7)' }} />
-          </div>
+           {/* LAYER 3: Target Dots (Floating in 3D Space on top of Viewport) */}
+           <div style={{ position: 'absolute', inset: 0, perspective: '600px', zIndex: 3, pointerEvents: 'none' }}>
+              <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
+                {SHOTS.map(s => {
+                  if (paintedImages.find(p => p.id === s.id)) return null;
+                  return (
+                    <div key={`dot-${s.id}`} style={{
+                      position: 'absolute', transformStyle: 'preserve-3d',
+                      transform: `rotateY(${s.yaw}deg) rotateX(${-s.pitch}deg) translateZ(-500px)`
+                    }}>
+                       <div style={{
+                         width: 44, height: 44, borderRadius: '50%', background: '#00D859',
+                         transform: 'translate(-50%, -50%)',
+                         border: '2px solid rgba(255,255,255,0.3)',
+                         boxShadow: '0 0 20px rgba(0,216,89,0.4)'
+                       }} />
+                    </div>
+                  )
+                })}
+              </div>
+           </div>
 
-          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', zIndex: 20, pointerEvents: 'auto' }}>
-            <div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>{roomName}</div>
-              <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.8)', marginTop: 2 }}>{positionLabel} - {capturedCount}/18</div>
-            </div>
-            <button onClick={finishCapture} style={{ width: 36, height: 36, borderRadius: '50%', border: 'none', background: 'rgba(0,0,0,0.4)', color: '#fff', fontSize: 20, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
-          </div>
-
-          <div style={{ position: 'absolute', top: 72, left: 16, right: 60, height: 3, background: 'rgba(255,255,255,0.2)', borderRadius: 2, overflow: 'hidden', zIndex: 20 }}>
-            <div style={{ width: `${coveragePct}%`, height: '100%', background: '#4CD964', transition: 'width 0.3s ease' }} />
-          </div>
-          <div style={{ position: 'absolute', top: 66, right: 16, fontSize: 13, color: 'rgba(255,255,255,0.7)', zIndex: 20 }}>{coveragePct}%</div>
-
-          {/* FORTIFIED: MICRO-RETICLE */}
-          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 15, pointerEvents: 'none' }}>
-            <div id="center-reticle" style={{
-              width: 44, height: 44, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.9)', position: 'relative', background: 'transparent'
-            }}>
-              <div style={{ position: 'absolute', top: '50%', left: '10%', right: '10%', height: 1, background: 'rgba(255,255,255,0.8)', transform: 'translateY(-50%)' }} />
-              <div style={{ position: 'absolute', left: '50%', top: '10%', bottom: '10%', width: 1, background: 'rgba(255,255,255,0.8)', transform: 'translateX(-50%)' }} />
-              <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 4, height: 4, borderRadius: '50%', background: '#fff' }} />
-            </div>
-          </div>
-
-          {flash && <div style={{ position: 'absolute', inset: 0, background: '#fff', opacity: 0.3, zIndex: 50 }} />}
-
-          {thumbnails.length > 0 && (
-            <div style={{ position: 'absolute', bottom: 110, left: 12, display: 'flex', gap: 6, zIndex: 20, overflowX: 'auto', maxWidth: '55%', padding: 3, pointerEvents: 'auto' }}>
-              {thumbnails.map((t, i) => (
-                <div key={t.id} style={{ flexShrink: 0, width: 48, height: 48, borderRadius: 6, overflow: 'hidden', border: '1.5px solid rgba(255,255,255,0.3)' }}>
-                  <img src={t.url} alt={`Shot`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, padding: '16px 20px 36px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', zIndex: 20, pointerEvents: 'auto' }}>
-            <button onClick={undoLast} style={{ padding: '10px 16px', borderRadius: 20, border: 'none', background: thumbnails.length > 0 ? 'rgba(0,0,0,0.5)' : 'rgba(0,0,0,0.25)', color: '#fff', fontSize: 15, fontWeight: 500, cursor: thumbnails.length > 0 ? 'pointer' : 'default', opacity: thumbnails.length > 0 ? 1 : 0.4, pointerEvents: thumbnails.length > 0 ? 'auto' : 'none' }}>↩ Undo</button>
-            <button onClick={finishCapture} style={{ padding: '10px 18px', borderRadius: 20, border: 'none', background: capturedCount >= totalNeeded ? '#4CD964' : 'rgba(0,0,0,0.25)', color: '#fff', fontSize: 15, fontWeight: 600, cursor: 'pointer', opacity: capturedCount >= totalNeeded ? 1 : 0.4 }}>Done</button>
-          </div>
+           {/* LAYER 4: UI Overlays (Buttons, Text, Progress) */}
+           <div style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
+              
+              {/* Top Buttons */}
+              <div style={{ position: 'absolute', top: 32, left: 24, pointerEvents: 'auto' }}>
+                 <button onClick={undoLast} disabled={paintedImages.length === 0} style={{
+                    width: 48, height: 48, borderRadius: '50%', background: '#fff', border: 'none',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
+                    opacity: paintedImages.length > 0 ? 1 : 0.4
+                 }}>
+                   <span style={{ color: '#000', fontSize: 26, fontWeight: 'bold' }}>⟲</span>
+                 </button>
+              </div>
+              
+              <div style={{ position: 'absolute', top: 32, right: 24, pointerEvents: 'auto' }}>
+                 <button onClick={finishCapture} style={{
+                    width: 48, height: 48, borderRadius: '50%', background: '#ff3b30', border: 'none',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'
+                 }}>
+                   <span style={{ color: '#fff', fontSize: 22, fontWeight: 'bold' }}>✕</span>
+                 </button>
+              </div>
+              
+              {/* Tilt Warning */}
+              <div style={{ position: 'absolute', top: 100, left: 0, right: 0, textAlign: 'center', opacity: showTiltWarning ? 1 : 0, transition: 'opacity 0.2s' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: '#ff3b30', color: '#fff', padding: '12px 24px', borderRadius: 30, fontWeight: 'bold', fontSize: 17, boxShadow: '0 4px 12px rgba(255,0,0,0.4)' }}>
+                  ⤹ Tilt your device upright ⤸
+                </span>
+              </div>
+              
+              {/* Helper Text */}
+              <div style={{ position: 'absolute', bottom: 110, left: 0, right: 0, textAlign: 'center', color: '#fff', fontSize: 17, fontWeight: 500 }}>
+                 Point your device at the green target
+              </div>
+              
+              {/* Bottom Progress Bar */}
+              <div style={{ position: 'absolute', bottom: 44, left: '8%', right: '8%', display: 'flex', alignItems: 'center', gap: 16 }}>
+                 <div style={{ flex: 1, height: 8, background: 'rgba(255,255,255,0.2)', borderRadius: 4, overflow: 'hidden' }}>
+                    <div style={{ width: `${(paintedImages.length / totalNeeded) * 100}%`, height: '100%', background: '#00D859', transition: 'width 0.3s ease' }} />
+                 </div>
+                 <div style={{ color: '#fff', fontSize: 15, fontWeight: '600', whiteSpace: 'nowrap' }}>
+                    {paintedImages.length} of {totalNeeded}
+                 </div>
+              </div>
+           </div>
         </div>
       )}
 
@@ -462,15 +441,15 @@ export default function ScanPage() {
         <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)', color: '#fff', zIndex: 100, overflowY: 'auto' }}>
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#4CD964', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, marginBottom: 16, color: '#fff' }}>✓</div>
           <h2 style={{ fontSize: 22, margin: '0 0 6px', fontWeight: 700 }}>Capture Complete!</h2>
-          <p style={{ fontSize: 13, color: '#8b949e', margin: '0 0 20px', textAlign: 'center' }}>{capturedCount} shots captured<br/>{roomName} — {positionLabel}</p>
+          <p style={{ fontSize: 13, color: '#8b949e', margin: '0 0 20px', textAlign: 'center' }}>{paintedImages.length} shots captured<br/>{roomName} — {positionLabel}</p>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, maxWidth: 300, width: '100%', marginBottom: 20 }}>
-            {thumbnails.slice(0, 9).map((t, i) => (
+            {paintedImages.slice(0, 9).map((t, i) => (
               <div key={t.id} style={{ aspectRatio: 1, borderRadius: 8, overflow: 'hidden', border: '1px solid #30363d' }}>
                 <img src={t.url} alt={`Shot`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
               </div>
             ))}
-            {thumbnails.length > 9 && (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: '#8b949e' }}>+{thumbnails.length - 9} more</div>
+            {paintedImages.length > 9 && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: '#8b949e' }}>+{paintedImages.length - 9} more</div>
             )}
           </div>
           <div style={{ width: '100%', maxWidth: 300, display: 'flex', flexDirection: 'column', gap: 10 }}>

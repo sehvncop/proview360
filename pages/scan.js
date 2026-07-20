@@ -22,7 +22,6 @@ export default function ScanPage() {
   const [showCaptureUI, setShowCaptureUI] = useState(false)
   const [showTiltWarning, setShowTiltWarning] = useState(false)
   
-  // React State for the 3D camera
   const [camRot, setCamRot] = useState({ pitch: 0, yaw: 0 })
 
   const videoRef = useRef(null)
@@ -32,8 +31,8 @@ export default function ScanPage() {
   const shotsDataRef = useRef([]) 
   
   const isProcessingRef = useRef(false)
-  const orientationRef = useRef({ alpha: 0, beta: 0, gamma: 0 })
-  const initialAlphaRef = useRef(null)
+  const orientationRef = useRef({ mathYaw: 0, mathPitch: 0, rawGamma: 0 })
+  const initialYawRef = useRef(null)
   const hoverStartRef = useRef(null)
   const rafRef = useRef(null)
 
@@ -62,13 +61,33 @@ export default function ScanPage() {
   const TOLERANCE = 5 
 
   const handleOrientation = useCallback((e) => {
-    let heading = 0;
+    // 1. Convert to Standard Alpha (CCW)
+    let A = e.alpha || 0;
     if (e.webkitCompassHeading !== undefined) {
-      heading = e.webkitCompassHeading;
-    } else {
-      heading = 360 - (e.alpha || 0);
+      A = 360 - e.webkitCompassHeading;
     }
-    orientationRef.current = { alpha: heading, beta: e.beta || 0, gamma: e.gamma || 0 }
+    
+    // 2. Convert degrees to radians
+    const rad = Math.PI / 180;
+    const alpha = A * rad;
+    const beta = (e.beta || 0) * rad;
+    const gamma = (e.gamma || 0) * rad;
+
+    // 3. Construct the 3D Rotation Matrix and extract the Forward Vector (Camera Looking Direction)
+    // This perfectly eliminates all Gimbal Lock and upside-down flipping!
+    const cA = Math.cos(alpha), sA = Math.sin(alpha);
+    const cB = Math.cos(beta), sB = Math.sin(beta);
+    const cG = Math.cos(gamma), sG = Math.sin(gamma);
+
+    const fX = -(cA * sG + sA * sB * cG);
+    const fY = -(sA * sG - cA * sB * cG);
+    const fZ = -cB * cG;
+
+    // 4. Extract absolute Pitch and Yaw from the solid 3D vector
+    const mathPitch = Math.asin(fZ) * (180 / Math.PI);
+    const mathYaw = Math.atan2(fY, fX) * (180 / Math.PI);
+
+    orientationRef.current = { mathYaw, mathPitch, rawGamma: e.gamma || 0 }
   }, [])
 
   const requestOrientation = async () => {
@@ -107,18 +126,20 @@ export default function ScanPage() {
 
   const updateGuidance = useCallback(() => {
     if (!showCaptureUI) return
-    if (initialAlphaRef.current === null) return
     if (isProcessingRef.current) return
-
-    const o = orientationRef.current
-    const currentYaw = (o.alpha - initialAlphaRef.current + 360) % 360
-    const currentPitch = 90 - o.beta
     
-    // FIX: Only trigger landscape warning if heavily tilted sideways (> 45 deg)
-    // AND completely ignore it if the user is pointing straight up or down (gimbal lock zones)
+    const o = orientationRef.current
+    if (initialYawRef.current === null) {
+       initialYawRef.current = o.mathYaw
+    }
+
+    // Because mathYaw decreases when turning right, we subtract it from the initial anchor
+    const currentYaw = (initialYawRef.current - o.mathYaw + 360) % 360
+    const currentPitch = o.mathPitch
+    
     let isPortrait = true;
     if (Math.abs(currentPitch) < 60) {
-      isPortrait = Math.abs(o.gamma) < 45;
+      isPortrait = Math.abs(o.rawGamma) < 45;
     }
     setShowTiltWarning(!isPortrait)
     
@@ -144,7 +165,6 @@ export default function ScanPage() {
       }
     })
 
-    // Hide target dot when in crosshair (Pie chart takes over)
     SHOTS.forEach(target => {
       const dotEl = document.getElementById(`dot-wrapper-${target.id}`)
       if (!dotEl) return
@@ -210,7 +230,7 @@ export default function ScanPage() {
       shotsDataRef.current = []
       setPaintedImages([])
       
-      initialAlphaRef.current = orientationRef.current.alpha
+      initialYawRef.current = null
 
       setScreen('capture')
       setShowCaptureUI(true)
@@ -347,7 +367,6 @@ export default function ScanPage() {
       {showCaptureUI && (
         <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
            
-           {/* LAYER 1: Painted Sphere (Z=1). Pure black background! */}
            <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 1, background: '#000' }}>
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
                 {paintedImages.map(img => (
@@ -355,7 +374,6 @@ export default function ScanPage() {
                     position: 'absolute', transformStyle: 'preserve-3d',
                     transform: `rotateY(${img.yaw}deg) rotateX(${-img.pitch}deg) translateZ(${Z_DIST}px)`
                   }}>
-                     {/* PERFECT VIEWPORT STAMP: Exactly 2x the VF size to mathematically cancel perspective scaling */}
                      <img src={img.url} style={{
                         width: PAINT_WIDTH, height: PAINT_HEIGHT, 
                         transform: 'translate(-50%, -50%)',
@@ -366,7 +384,6 @@ export default function ScanPage() {
               </div>
            </div>
 
-           {/* LAYER 2: Live Viewport Box (Z=2). The ONLY place live video shows. */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
               <div style={{ 
                  width: VF_WIDTH, height: VF_HEIGHT, 
@@ -376,7 +393,6 @@ export default function ScanPage() {
               }}>
                  <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                  
-                 {/* Center Reticle Pie Chart */}
                  <div style={{
                     position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
                     width: 54, height: 54, borderRadius: '50%', border: '4px solid #fff',
@@ -393,7 +409,6 @@ export default function ScanPage() {
               </div>
            </div>
 
-           {/* LAYER 3: Target Dots (Z=3). Floating over everything. */}
            <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 3, pointerEvents: 'none' }}>
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
                 {SHOTS.map(s => {
@@ -414,7 +429,6 @@ export default function ScanPage() {
               </div>
            </div>
 
-           {/* LAYER 4: UI Overlays (Buttons, Text, Progress) */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
               
               <div style={{ position: 'absolute', top: 32, left: 24, pointerEvents: 'auto' }}>
@@ -436,7 +450,6 @@ export default function ScanPage() {
                  </button>
               </div>
               
-              {/* Tilt Warning */}
               <div style={{ position: 'absolute', top: 100, left: 0, right: 0, textAlign: 'center', opacity: showTiltWarning ? 1 : 0, transition: 'opacity 0.2s' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: '#ff3b30', color: '#fff', padding: '12px 24px', borderRadius: 30, fontWeight: 'bold', fontSize: 17, boxShadow: '0 4px 12px rgba(255,0,0,0.4)' }}>
                   ⤹ Keep the phone in portrait ⤸
@@ -447,7 +460,6 @@ export default function ScanPage() {
                  Point your device at the green target
               </div>
               
-              {/* Progress Bar */}
               <div style={{ position: 'absolute', bottom: 44, left: '8%', right: '8%', display: 'flex', alignItems: 'center', gap: 16 }}>
                  <div style={{ flex: 1, height: 8, background: 'rgba(255,255,255,0.2)', borderRadius: 4, overflow: 'hidden' }}>
                     <div style={{ width: `${(paintedImages.length / totalNeeded) * 100}%`, height: '100%', background: '#00D859', transition: 'width 0.3s ease' }} />

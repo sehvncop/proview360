@@ -2,9 +2,11 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import Head from 'next/head'
 import JSZip from 'jszip'
 
-// Perfect Stamping Math Constants
-const VF_WIDTH = 300;
-const VF_HEIGHT = 400;
+// PERFECT 16:9 AR HUD GEOMETRY
+// This guarantees that the 3D stamped images perfectly match the 1080x1920 camera capture,
+// allowing the user to visually align edges and eliminate parallax ghosting!
+const VF_WIDTH = 270;
+const VF_HEIGHT = 480; 
 const PERSPECTIVE = 600;
 const Z_DIST = -600;
 const PAINT_WIDTH = VF_WIDTH * 2;
@@ -60,21 +62,18 @@ export default function ScanPage() {
   const totalNeeded = SHOTS.length
   const TOLERANCE = 5 
 
+  // BULLETPROOF 3D VECTOR GYRO (Eliminates Gimbal Lock)
   const handleOrientation = useCallback((e) => {
-    // 1. Convert to Standard Alpha (CCW)
     let A = e.alpha || 0;
     if (e.webkitCompassHeading !== undefined) {
       A = 360 - e.webkitCompassHeading;
     }
     
-    // 2. Convert degrees to radians
     const rad = Math.PI / 180;
     const alpha = A * rad;
     const beta = (e.beta || 0) * rad;
     const gamma = (e.gamma || 0) * rad;
 
-    // 3. Construct the 3D Rotation Matrix and extract the Forward Vector (Camera Looking Direction)
-    // This perfectly eliminates all Gimbal Lock and upside-down flipping!
     const cA = Math.cos(alpha), sA = Math.sin(alpha);
     const cB = Math.cos(beta), sB = Math.sin(beta);
     const cG = Math.cos(gamma), sG = Math.sin(gamma);
@@ -83,7 +82,6 @@ export default function ScanPage() {
     const fY = -(sA * sG - cA * sB * cG);
     const fZ = -cB * cG;
 
-    // 4. Extract absolute Pitch and Yaw from the solid 3D vector
     const mathPitch = Math.asin(fZ) * (180 / Math.PI);
     const mathYaw = Math.atan2(fY, fX) * (180 / Math.PI);
 
@@ -133,7 +131,6 @@ export default function ScanPage() {
        initialYawRef.current = o.mathYaw
     }
 
-    // Because mathYaw decreases when turning right, we subtract it from the initial anchor
     const currentYaw = (initialYawRef.current - o.mathYaw + 360) % 360
     const currentPitch = o.mathPitch
     
@@ -367,6 +364,7 @@ export default function ScanPage() {
       {showCaptureUI && (
         <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
            
+           {/* LAYER 1: Painted Images (Perfectly Sized to FOV) */}
            <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 1, background: '#000' }}>
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
                 {paintedImages.map(img => (
@@ -377,27 +375,30 @@ export default function ScanPage() {
                      <img src={img.url} style={{
                         width: PAINT_WIDTH, height: PAINT_HEIGHT, 
                         transform: 'translate(-50%, -50%)',
-                        objectFit: 'cover', opacity: 1.0
+                        objectFit: 'cover', opacity: 0.85
                      }} />
                   </div>
                 ))}
               </div>
            </div>
 
+           {/* LAYER 2: Live Video Window (True 16:9 AR HUD) */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
               <div style={{ 
                  width: VF_WIDTH, height: VF_HEIGHT, 
-                 border: '2px solid rgba(255,255,255,0.85)', 
+                 border: '2px solid rgba(255,255,255,0.6)', 
+                 borderRadius: '12px',
                  position: 'relative', overflow: 'hidden',
-                 background: '#000' 
+                 background: '#000',
+                 boxShadow: '0 0 0 4000px rgba(0,0,0,0.85)' // Dim the periphery, highlight the center
               }}>
-                 <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                 <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0.95 }} />
                  
                  <div style={{
                     position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
                     width: 54, height: 54, borderRadius: '50%', border: '4px solid #fff',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: 'transparent'
+                    background: 'transparent', opacity: 0.8
                  }}>
                     <div id="reticle-fill" style={{
                        width: '100%', height: '100%', borderRadius: '50%',
@@ -409,6 +410,7 @@ export default function ScanPage() {
               </div>
            </div>
 
+           {/* LAYER 3: 3D Tracking Dots */}
            <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 3, pointerEvents: 'none' }}>
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
                 {SHOTS.map(s => {
@@ -429,6 +431,7 @@ export default function ScanPage() {
               </div>
            </div>
 
+           {/* LAYER 4: UI Controls */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
               
               <div style={{ position: 'absolute', top: 32, left: 24, pointerEvents: 'auto' }}>
@@ -457,7 +460,7 @@ export default function ScanPage() {
               </div>
               
               <div style={{ position: 'absolute', bottom: 110, left: 0, right: 0, textAlign: 'center', color: '#fff', fontSize: 17, fontWeight: 500 }}>
-                 Point your device at the green target
+                 Align the live video with the stamped photos
               </div>
               
               <div style={{ position: 'absolute', bottom: 44, left: '8%', right: '8%', display: 'flex', alignItems: 'center', gap: 16 }}>

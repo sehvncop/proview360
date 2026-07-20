@@ -114,7 +114,12 @@ export default function ScanPage() {
     const currentYaw = (o.alpha - initialAlphaRef.current + 360) % 360
     const currentPitch = 90 - o.beta
     
-    const isPortrait = Math.abs(o.gamma) < 25
+    // FIX: Only trigger landscape warning if heavily tilted sideways (> 45 deg)
+    // AND completely ignore it if the user is pointing straight up or down (gimbal lock zones)
+    let isPortrait = true;
+    if (Math.abs(currentPitch) < 60) {
+      isPortrait = Math.abs(o.gamma) < 45;
+    }
     setShowTiltWarning(!isPortrait)
     
     setCamRot({ pitch: currentPitch, yaw: currentYaw })
@@ -434,7 +439,7 @@ export default function ScanPage() {
               {/* Tilt Warning */}
               <div style={{ position: 'absolute', top: 100, left: 0, right: 0, textAlign: 'center', opacity: showTiltWarning ? 1 : 0, transition: 'opacity 0.2s' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: '#ff3b30', color: '#fff', padding: '12px 24px', borderRadius: 30, fontWeight: 'bold', fontSize: 17, boxShadow: '0 4px 12px rgba(255,0,0,0.4)' }}>
-                  ⤹ Tilt your device upright ⤸
+                  ⤹ Keep the phone in portrait ⤸
                 </span>
               </div>
               

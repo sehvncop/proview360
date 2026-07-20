@@ -2,6 +2,14 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import Head from 'next/head'
 import JSZip from 'jszip'
 
+// Perfect Stamping Math Constants
+const VF_WIDTH = 300;
+const VF_HEIGHT = 400;
+const PERSPECTIVE = 600;
+const Z_DIST = -600;
+const PAINT_WIDTH = VF_WIDTH * 2;
+const PAINT_HEIGHT = VF_HEIGHT * 2;
+
 export default function ScanPage() {
   const [screen, setScreen] = useState('start')
   const [roomName, setRoomName] = useState('')
@@ -51,8 +59,6 @@ export default function ScanPage() {
     { id: 'bottom', label: 'FLOOR',   yaw: 0,   pitch: -90 }
   ]
   const totalNeeded = SHOTS.length
-  
-  // FORTIFIED: Tight tolerance
   const TOLERANCE = 5 
 
   const handleOrientation = useCallback((e) => {
@@ -88,16 +94,14 @@ export default function ScanPage() {
   }
 
   const updateCrosshairUI = (isActive, progress) => {
-    const reticle = document.getElementById('center-reticle')
-    if (!reticle) return
+    const fill = document.getElementById('reticle-fill')
+    if (!fill) return
     
     if (isActive) {
-       reticle.style.borderColor = '#00D859'
        const deg = progress * 360
-       reticle.style.background = `conic-gradient(#00D859 ${deg}deg, transparent ${deg}deg)`
+       fill.style.background = `conic-gradient(#00D859 ${deg}deg, transparent 0)`
     } else {
-       reticle.style.borderColor = '#fff'
-       reticle.style.background = 'transparent'
+       fill.style.background = 'transparent'
     }
   }
 
@@ -118,7 +122,6 @@ export default function ScanPage() {
     let targetInCrosshair = null
 
     SHOTS.forEach(target => {
-      // Check if already captured in state
       if (paintedImages.find(p => p.id === target.id)) return
       
       const yawDiff = Math.abs(getSignedDiff(target.yaw, currentYaw))
@@ -133,6 +136,18 @@ export default function ScanPage() {
       
       if (aligned) {
         targetInCrosshair = target
+      }
+    })
+
+    // Hide target dot when in crosshair (Pie chart takes over)
+    SHOTS.forEach(target => {
+      const dotEl = document.getElementById(`dot-wrapper-${target.id}`)
+      if (!dotEl) return
+      
+      if (targetInCrosshair && targetInCrosshair.id === target.id) {
+        dotEl.style.opacity = '0'
+      } else {
+        dotEl.style.opacity = '1'
       }
     })
 
@@ -270,7 +285,7 @@ export default function ScanPage() {
       }))
     }, null, 2))
     
-    folder.file('metafile.json', JSON.stringify({ platform: 'web', create_date: new Date().toISOString(), app_version: '2.0.0' }, null, 2))
+    folder.file('metafile.json', JSON.stringify({ platform: 'web', create_date: new Date().toISOString(), app_version: '2.1.0' }, null, 2))
     
     shotsDataRef.current.forEach((shot, i) => folder.file(`shot_${String(i + 1).padStart(3, '0')}.jpg`, shot.blob))
     
@@ -327,61 +342,66 @@ export default function ScanPage() {
       {showCaptureUI && (
         <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
            
-           {/* LAYER 1: Painted Sphere (Captured Images in 3D Space) */}
-           <div style={{ position: 'absolute', inset: 0, perspective: '600px', zIndex: 1 }}>
+           {/* LAYER 1: Painted Sphere (Z=1). Pure black background! */}
+           <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 1, background: '#000' }}>
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
                 {paintedImages.map(img => (
                   <div key={`paint-${img.id}`} style={{
                     position: 'absolute', transformStyle: 'preserve-3d',
-                    transform: `rotateY(${img.yaw}deg) rotateX(${-img.pitch}deg) translateZ(-500px)`
+                    transform: `rotateY(${img.yaw}deg) rotateX(${-img.pitch}deg) translateZ(${Z_DIST}px)`
                   }}>
+                     {/* PERFECT VIEWPORT STAMP: Exactly 2x the VF size to mathematically cancel perspective scaling */}
                      <img src={img.url} style={{
-                        width: 640, height: 1137, // Approximate phone FOV scaled to 500px depth
+                        width: PAINT_WIDTH, height: PAINT_HEIGHT, 
                         transform: 'translate(-50%, -50%)',
-                        objectFit: 'cover', opacity: 0.6,
-                        boxShadow: '0 0 40px rgba(0,0,0,0.9)' // Blends edges softly into the dark void
+                        objectFit: 'cover', opacity: 1.0
                      }} />
                   </div>
                 ))}
               </div>
            </div>
 
-           {/* LAYER 2: Live Viewport Box (Floating in Center) */}
-           <div style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+           {/* LAYER 2: Live Viewport Box (Z=2). The ONLY place live video shows. */}
+           <div style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
               <div style={{ 
-                 width: '75%', maxWidth: 360, aspectRatio: '3/4', 
-                 border: '1px solid rgba(255,255,255,0.7)', borderRadius: 2, 
+                 width: VF_WIDTH, height: VF_HEIGHT, 
+                 border: '2px solid rgba(255,255,255,0.85)', 
                  position: 'relative', overflow: 'hidden',
-                 boxShadow: '0 0 0 9999px rgba(0,0,0,0.85)' // Dim the painted world outside the box
+                 background: '#000' 
               }}>
                  <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                  
-                 {/* Center Reticle */}
-                 <div id="center-reticle" style={{
+                 {/* Center Reticle Pie Chart */}
+                 <div style={{
                     position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-                    width: 64, height: 64, borderRadius: '50%', border: '4px solid #fff',
-                    transition: 'all 0.2s ease', background: 'transparent'
-                 }} />
+                    width: 54, height: 54, borderRadius: '50%', border: '4px solid #fff',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: 'transparent'
+                 }}>
+                    <div id="reticle-fill" style={{
+                       width: '100%', height: '100%', borderRadius: '50%',
+                       background: 'transparent'
+                    }} />
+                 </div>
                  
                  {flash && <div style={{ position: 'absolute', inset: 0, background: '#fff', zIndex: 50 }} />}
               </div>
            </div>
 
-           {/* LAYER 3: Target Dots (Floating in 3D Space on top of Viewport) */}
-           <div style={{ position: 'absolute', inset: 0, perspective: '600px', zIndex: 3, pointerEvents: 'none' }}>
+           {/* LAYER 3: Target Dots (Z=3). Floating over everything. */}
+           <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 3, pointerEvents: 'none' }}>
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
                 {SHOTS.map(s => {
                   if (paintedImages.find(p => p.id === s.id)) return null;
                   return (
-                    <div key={`dot-${s.id}`} style={{
+                    <div key={`dot-${s.id}`} id={`dot-wrapper-${s.id}`} style={{
                       position: 'absolute', transformStyle: 'preserve-3d',
-                      transform: `rotateY(${s.yaw}deg) rotateX(${-s.pitch}deg) translateZ(-500px)`
+                      transform: `rotateY(${s.yaw}deg) rotateX(${-s.pitch}deg) translateZ(${Z_DIST}px)`,
+                      transition: 'opacity 0.2s'
                     }}>
                        <div style={{
                          width: 44, height: 44, borderRadius: '50%', background: '#00D859',
-                         transform: 'translate(-50%, -50%)',
-                         border: '2px solid rgba(255,255,255,0.3)',
-                         boxShadow: '0 0 20px rgba(0,216,89,0.4)'
+                         transform: 'translate(-50%, -50%)'
                        }} />
                     </div>
                   )
@@ -392,7 +412,6 @@ export default function ScanPage() {
            {/* LAYER 4: UI Overlays (Buttons, Text, Progress) */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
               
-              {/* Top Buttons */}
               <div style={{ position: 'absolute', top: 32, left: 24, pointerEvents: 'auto' }}>
                  <button onClick={undoLast} disabled={paintedImages.length === 0} style={{
                     width: 48, height: 48, borderRadius: '50%', background: '#fff', border: 'none',
@@ -419,12 +438,11 @@ export default function ScanPage() {
                 </span>
               </div>
               
-              {/* Helper Text */}
               <div style={{ position: 'absolute', bottom: 110, left: 0, right: 0, textAlign: 'center', color: '#fff', fontSize: 17, fontWeight: 500 }}>
                  Point your device at the green target
               </div>
               
-              {/* Bottom Progress Bar */}
+              {/* Progress Bar */}
               <div style={{ position: 'absolute', bottom: 44, left: '8%', right: '8%', display: 'flex', alignItems: 'center', gap: 16 }}>
                  <div style={{ flex: 1, height: 8, background: 'rgba(255,255,255,0.2)', borderRadius: 4, overflow: 'hidden' }}>
                     <div style={{ width: `${(paintedImages.length / totalNeeded) * 100}%`, height: '100%', background: '#00D859', transition: 'width 0.3s ease' }} />

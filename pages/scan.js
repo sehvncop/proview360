@@ -2,15 +2,8 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import Head from 'next/head'
 import JSZip from 'jszip'
 
-// PERFECT 16:9 AR HUD GEOMETRY
-// This guarantees that the 3D stamped images perfectly match the 1080x1920 camera capture,
-// allowing the user to visually align edges and eliminate parallax ghosting!
-const VF_WIDTH = 270;
-const VF_HEIGHT = 480; 
 const PERSPECTIVE = 600;
 const Z_DIST = -600;
-const PAINT_WIDTH = VF_WIDTH * 2;
-const PAINT_HEIGHT = VF_HEIGHT * 2;
 
 export default function ScanPage() {
   const [screen, setScreen] = useState('start')
@@ -25,20 +18,19 @@ export default function ScanPage() {
   const [showTiltWarning, setShowTiltWarning] = useState(false)
   
   const [camRot, setCamRot] = useState({ pitch: 0, yaw: 0 })
+  const [hud, setHud] = useState({ vfW: 270, vfH: 480, pW: 540, pH: 960 })
 
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
   const streamRef = useRef(null)
   
   const shotsDataRef = useRef([]) 
-  
   const isProcessingRef = useRef(false)
   const orientationRef = useRef({ mathYaw: 0, mathPitch: 0, rawGamma: 0 })
   const initialYawRef = useRef(null)
   const hoverStartRef = useRef(null)
   const rafRef = useRef(null)
 
-  // 18-SHOT FULL SPHERE GRID
   const SHOTS = [
     { id: 'h1', label: 'FRONT',       yaw: 0,   pitch: 0 },
     { id: 'h2', label: 'FRONT-RIGHT', yaw: 45,  pitch: 0 },
@@ -62,7 +54,13 @@ export default function ScanPage() {
   const totalNeeded = SHOTS.length
   const TOLERANCE = 5 
 
-  // BULLETPROOF 3D VECTOR GYRO (Eliminates Gimbal Lock)
+  useEffect(() => {
+    // Dynamically calculate the Matterport HUD window to cover 90% of the user's specific phone screen
+    const w = Math.min(window.innerWidth * 0.9, 380);
+    const h = w * (16 / 9);
+    setHud({ vfW: w, vfH: h, pW: w * 2, pH: h * 2 });
+  }, []);
+
   const handleOrientation = useCallback((e) => {
     let A = e.alpha || 0;
     if (e.webkitCompassHeading !== undefined) {
@@ -226,7 +224,6 @@ export default function ScanPage() {
       
       shotsDataRef.current = []
       setPaintedImages([])
-      
       initialYawRef.current = null
 
       setScreen('capture')
@@ -348,7 +345,7 @@ export default function ScanPage() {
         <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)', color: '#fff', zIndex: 100, overflowY: 'auto' }}>
           <div style={{ width: 72, height: 72, borderRadius: 18, background: 'linear-gradient(135deg, #00d2ff, #3a7bd5)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, marginBottom: 20, boxShadow: '0 8px 32px rgba(0,210,255,0.3)' }}>AR</div>
           <h1 style={{ fontSize: 26, margin: '0 0 6px', fontWeight: 700 }}>ProView360 AR</h1>
-          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>True 3D Spherical Capture</p>
+          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>Matterport Engine V10</p>
           
           <div style={{ width: '100%', maxWidth: 340 }}>
             <label style={{ fontSize: 12, color: '#8b949e', display: 'block', marginBottom: 6, fontWeight: 500 }}>Room Name</label>
@@ -364,7 +361,7 @@ export default function ScanPage() {
       {showCaptureUI && (
         <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
            
-           {/* LAYER 1: Painted Images (Perfectly Sized to FOV) */}
+           {/* LAYER 1: Painted Images (Perfectly Sized, Brightly Visible in Pure Black Void) */}
            <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 1, background: '#000' }}>
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
                 {paintedImages.map(img => (
@@ -373,26 +370,26 @@ export default function ScanPage() {
                     transform: `rotateY(${img.yaw}deg) rotateX(${-img.pitch}deg) translateZ(${Z_DIST}px)`
                   }}>
                      <img src={img.url} style={{
-                        width: PAINT_WIDTH, height: PAINT_HEIGHT, 
+                        width: hud.pW, height: hud.pH, 
                         transform: 'translate(-50%, -50%)',
-                        objectFit: 'cover', opacity: 0.85
+                        objectFit: 'cover', opacity: 1.0
                      }} />
                   </div>
                 ))}
               </div>
            </div>
 
-           {/* LAYER 2: Live Video Window (True 16:9 AR HUD) */}
+           {/* LAYER 2: Live Video Window (Dynamic Matterport Viewport) */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
               <div style={{ 
-                 width: VF_WIDTH, height: VF_HEIGHT, 
-                 border: '2px solid rgba(255,255,255,0.6)', 
-                 borderRadius: '12px',
+                 width: hud.vfW, height: hud.vfH, 
+                 border: '2px solid rgba(255,255,255,0.7)', 
+                 borderRadius: '16px',
                  position: 'relative', overflow: 'hidden',
-                 background: '#000',
-                 boxShadow: '0 0 0 4000px rgba(0,0,0,0.85)' // Dim the periphery, highlight the center
+                 background: '#000'
+                 // NO MORE BOX SHADOW. The void remains pure black, and images are fully visible!
               }}>
-                 <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0.95 }} />
+                 <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                  
                  <div style={{
                     position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
@@ -433,7 +430,6 @@ export default function ScanPage() {
 
            {/* LAYER 4: UI Controls */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
-              
               <div style={{ position: 'absolute', top: 32, left: 24, pointerEvents: 'auto' }}>
                  <button onClick={undoLast} disabled={paintedImages.length === 0} style={{
                     width: 48, height: 48, borderRadius: '50%', background: '#fff', border: 'none',

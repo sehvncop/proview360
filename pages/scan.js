@@ -38,12 +38,7 @@ export default function ScanPage() {
   const isSweepingRef = useRef(false)
   const signedAccumulatedYawRef = useRef(0)
   const lastSweepYawRef = useRef(null)
-  const telemetryRef = useRef([])
-  const mediaRecorderRef = useRef(null)
-  const recordedChunksRef = useRef([])
-  const recordingStartTimeRef = useRef(null)
-  const sweepVideoBlobRef = useRef(null)
-  const sweepExtRef = useRef('mp4')
+  const lastCapturedStepRef = useRef(0)
 
   const SHOTS = [
     { id: 'top',    label: 'CEILING', yaw: 0,   pitch: 90 },
@@ -109,6 +104,31 @@ export default function ScanPage() {
     }
   }
 
+  const captureSilentFrame = async (targetYaw, targetPitch) => {
+    isProcessingRef.current = true
+    const video = videoRef.current
+    const canvas = canvasRef.current
+    if (!video || !canvas) { isProcessingRef.current = false; return }
+
+    // Flash UI slightly for feedback
+    setFlash(true)
+    setTimeout(() => setFlash(false), 50)
+
+    canvas.width = video.videoWidth || 1080
+    canvas.height = video.videoHeight || 1920
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
+    
+    // We do NOT add this to paintedImages so it doesn't crash the CSS 3D!
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+    
+    shotsDataRef.current.push({
+      id: `auto_${Date.now()}`, yaw: targetYaw, pitch: targetPitch,
+      label: 'WALL', blob, timestamp: new Date().toISOString()
+    })
+    
+    isProcessingRef.current = false
+  }
+
   const updateGuidance = useCallback(() => {
     if (!showCaptureUI) return
     if (isProcessingRef.current) return
@@ -128,33 +148,29 @@ export default function ScanPage() {
     setShowTiltWarning(!isPortrait)
     setCamRot({ pitch: currentPitch, yaw: currentYaw })
 
-    if (isSweepingRef.current && recordingStartTimeRef.current !== null) {
-       const now = Date.now()
-       const timeSinceStart = (now - recordingStartTimeRef.current) / 1000
-       
-       telemetryRef.current.push({ time: timeSinceStart, yaw: currentYaw, pitch: currentPitch })
-
+    if (isSweepingRef.current) {
        if (lastSweepYawRef.current === null) {
          lastSweepYawRef.current = currentYaw
+         // Capture the very first frame of the sweep immediately
+         captureSilentFrame(currentYaw, currentPitch)
        } else {
          let delta = getSignedDiff(currentYaw, lastSweepYawRef.current)
          signedAccumulatedYawRef.current += delta
          lastSweepYawRef.current = currentYaw
          
-         const progress = Math.min(1, Math.abs(signedAccumulatedYawRef.current) / 380)
+         const absAccumulated = Math.abs(signedAccumulatedYawRef.current)
+         const progress = Math.min(1, absAccumulated / 380)
          setSweepProgress(progress)
          
-         if (telemetryRef.current.length > 15) {
-           const past = telemetryRef.current[telemetryRef.current.length - 15]
-           const dt = timeSinceStart - past.time
-           if (dt > 0) {
-             let rawDelta = getSignedDiff(currentYaw, past.yaw)
-             let speed = Math.abs(rawDelta) / dt 
-             setSweepSpeedWarning(speed > 45) 
-           }
+         const TARGET_STEP = 22.5
+         const currentStep = Math.floor(absAccumulated / TARGET_STEP)
+         
+         if (currentStep > lastCapturedStepRef.current && !isProcessingRef.current) {
+             lastCapturedStepRef.current = currentStep
+             captureSilentFrame(currentYaw, currentPitch)
          }
-
-         if (Math.abs(signedAccumulatedYawRef.current) >= 380) {
+         
+         if (absAccumulated >= 380) {
            stopSweep()
          }
        }
@@ -213,7 +229,7 @@ export default function ScanPage() {
         updateCrosshairUI(true, progress)
         
         if (progress >= 1 && !isProcessingRef.current) {
-           captureFrame(targetInCrosshair)
+           captureDotFrame(targetInCrosshair)
            hoverStartRef.current = null
            updateCrosshairUI(false, 0)
         }
@@ -266,7 +282,7 @@ export default function ScanPage() {
     }
   }
 
-  const captureFrame = async (target) => {
+  const captureDotFrame = async (target) => {
     isProcessingRef.current = true
     const video = videoRef.current
     const canvas = canvasRef.current
@@ -291,12 +307,10 @@ export default function ScanPage() {
     thumbCanvas.getContext('2d').drawImage(canvas, 0, 0, thumbWidth, thumbHeight)
     const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.6) 
     
-    const shotData = {
+    shotsDataRef.current.push({
       id: target.id, yaw: target.yaw, pitch: target.pitch,
       label: target.label, blob, timestamp: new Date().toISOString()
-    }
-    
-    shotsDataRef.current.push(shotData)
+    })
     
     const newPaintedImages = [...paintedImages, { id: target.id, url: thumbUrl, yaw: target.yaw, pitch: target.pitch }]
     setPaintedImages(newPaintedImages)
@@ -317,46 +331,14 @@ export default function ScanPage() {
     isSweepingRef.current = true;
     signedAccumulatedYawRef.current = 0;
     lastSweepYawRef.current = null;
-    telemetryRef.current = [];
-    recordingStartTimeRef.current = null; // Do NOT start logging yet!
-    recordedChunksRef.current = [];
+    lastCapturedStepRef.current = 0;
     setSweepProgress(0);
     setSweepSpeedWarning(false);
     setCapturePhase('sweep_active');
-
-    try {
-      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 
-                       (MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : 'video/webm');
-      sweepExtRef.current = mimeType.includes('mp4') ? 'mp4' : 'webm';
-      
-      const recorder = new MediaRecorder(streamRef.current, { mimeType, videoBitsPerSecond: 10000000 });
-      
-      // ANTI-BLUR SYNC FIX: Only begin logging telemetry EXACTLY when the video hardware actually kicks on!
-      recorder.onstart = () => {
-        recordingStartTimeRef.current = Date.now();
-        telemetryRef.current = []; 
-      };
-      
-      recorder.ondataavailable = e => { if (e.data.size > 0) recordedChunksRef.current.push(e.data) }
-      recorder.onstop = () => finalizeSweep()
-      recorder.start(100); 
-      mediaRecorderRef.current = recorder;
-    } catch(e) {
-      alert("Video recording failed on this device.");
-      setCapturePhase('sweep_ready');
-    }
   }
 
   const stopSweep = () => {
     isSweepingRef.current = false;
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
-    }
-  }
-
-  const finalizeSweep = () => {
-    const blob = new Blob(recordedChunksRef.current, { type: mediaRecorderRef.current.mimeType });
-    sweepVideoBlobRef.current = blob;
     finishCapture();
   }
 
@@ -392,16 +374,12 @@ export default function ScanPage() {
         filename: `shot_${String(i + 1).padStart(3, '0')}.jpg`,
         yaw: s.yaw, pitch: s.pitch, label: s.label, timestamp: s.timestamp
       })),
-      hasSweep: true,
-      sweepFile: `sweep.${sweepExtRef.current}`,
-      telemetryFile: `telemetry.json`
+      hasSweep: false // We output standard 18-shots!
     }, null, 2))
     
     folder.file('metafile.json', JSON.stringify({ platform: 'web', create_date: new Date().toISOString(), app_version: '2.1.0' }, null, 2))
     
     shotsDataRef.current.forEach((shot, i) => folder.file(`shot_${String(i + 1).padStart(3, '0')}.jpg`, shot.blob))
-    folder.file(`sweep.${sweepExtRef.current}`, sweepVideoBlobRef.current)
-    folder.file(`telemetry.json`, JSON.stringify(telemetryRef.current))
     
     const content = await zip.generateAsync({ type: 'blob' })
     const url = URL.createObjectURL(content)
@@ -415,7 +393,6 @@ export default function ScanPage() {
     setScreen('start')
     setPaintedImages([])
     shotsDataRef.current = []
-    sweepVideoBlobRef.current = null
   }
 
   useEffect(() => {
@@ -439,7 +416,7 @@ export default function ScanPage() {
         <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)', color: '#fff', zIndex: 100, overflowY: 'auto' }}>
           <div style={{ width: 72, height: 72, borderRadius: 18, background: 'linear-gradient(135deg, #00d2ff, #3a7bd5)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, marginBottom: 20, boxShadow: '0 8px 32px rgba(0,210,255,0.3)' }}>AR</div>
           <h1 style={{ fontSize: 26, margin: '0 0 6px', fontWeight: 700 }}>ProView360 AR</h1>
-          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>Hybrid Video Engine</p>
+          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>V18 Silent Auto-Capture Engine</p>
           
           <div style={{ width: '100%', maxWidth: 340 }}>
             <label style={{ fontSize: 12, color: '#8b949e', display: 'block', marginBottom: 6, fontWeight: 500 }}>Room Name</label>
@@ -539,7 +516,7 @@ export default function ScanPage() {
                     </div>
                  )}
 
-                 {flash && <div style={{ position: 'absolute', inset: 0, background: '#fff', zIndex: 50 }} />}
+                 {flash && <div style={{ position: 'absolute', inset: 0, background: 'rgba(255,255,255,0.7)', zIndex: 50 }} />}
               </div>
            </div>
 
@@ -613,11 +590,11 @@ export default function ScanPage() {
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#4CD964', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, margin: '0 0 16px', color: '#fff' }}>✓</div>
           <h2 style={{ fontSize: 22, margin: '0 0 6px', fontWeight: 700 }}>Capture Complete!</h2>
           <p style={{ fontSize: 13, color: '#8b949e', margin: '0 0 20px', textAlign: 'center' }}>
-            {sweepVideoBlobRef.current ? '360° Sweep + Ceiling/Floor' : `${paintedImages.length} shots captured`}<br/>
+            {shotsDataRef.current.length} shots perfectly synchronized<br/>
             {roomName} — {positionLabel}
           </p>
           <div style={{ width: '100%', maxWidth: 300, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <button onClick={downloadZip} style={{ width: '100%', padding: 14, borderRadius: 14, border: 'none', background: '#00d2ff', color: '#000', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>⬇ Download Hybrid ZIP</button>
+            <button onClick={downloadZip} style={{ width: '100%', padding: 14, borderRadius: 14, border: 'none', background: '#00d2ff', color: '#000', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>⬇ Download Fast ZIP</button>
             <button onClick={nextPosition} style={{ width: '100%', padding: 12, borderRadius: 14, border: '1px solid #00d2ff', background: 'transparent', color: '#00d2ff', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>+ Next Position</button>
           </div>
         </div>

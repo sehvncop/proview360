@@ -2,8 +2,14 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import Head from 'next/head'
 import JSZip from 'jszip'
 
+// MATHEMATICALLY PERFECT AR HUD SCALING
+// The 3D images are scaled to perfectly match the Live Video FOV inside the Viewfinder!
 const PERSPECTIVE = 600;
 const Z_DIST = -600;
+const VIDEO_SCREEN_W = 625;
+const VIDEO_SCREEN_H = VIDEO_SCREEN_W * (16 / 9); // 1111px
+const PAINT_WIDTH = VIDEO_SCREEN_W * 2;           // 1250px
+const PAINT_HEIGHT = VIDEO_SCREEN_H * 2;          // 2222px
 
 export default function ScanPage() {
   const [screen, setScreen] = useState('start')
@@ -18,7 +24,7 @@ export default function ScanPage() {
   const [showTiltWarning, setShowTiltWarning] = useState(false)
   
   const [camRot, setCamRot] = useState({ pitch: 0, yaw: 0 })
-  const [hud, setHud] = useState({ vfW: 270, vfH: 480, pW: 540, pH: 960 })
+  const [arrowAngle, setArrowAngle] = useState(null)
 
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
@@ -53,13 +59,6 @@ export default function ScanPage() {
   ]
   const totalNeeded = SHOTS.length
   const TOLERANCE = 5 
-
-  useEffect(() => {
-    // Dynamically calculate the Matterport HUD window to cover 90% of the user's specific phone screen
-    const w = Math.min(window.innerWidth * 0.9, 380);
-    const h = w * (16 / 9);
-    setHud({ vfW: w, vfH: h, pW: w * 2, pH: h * 2 });
-  }, []);
 
   const handleOrientation = useCallback((e) => {
     let A = e.alpha || 0;
@@ -111,7 +110,6 @@ export default function ScanPage() {
   const updateCrosshairUI = (isActive, progress) => {
     const fill = document.getElementById('reticle-fill')
     if (!fill) return
-    
     if (isActive) {
        const deg = progress * 360
        fill.style.background = `conic-gradient(#00D859 ${deg}deg, transparent 0)`
@@ -141,12 +139,20 @@ export default function ScanPage() {
     setCamRot({ pitch: currentPitch, yaw: currentYaw })
     
     let targetInCrosshair = null
+    let closestTarget = null;
+    let minDiff = Infinity;
 
     SHOTS.forEach(target => {
       if (paintedImages.find(p => p.id === target.id)) return
       
       const yawDiff = Math.abs(getSignedDiff(target.yaw, currentYaw))
       const pitchDiff = Math.abs(target.pitch - currentPitch)
+      const dist = yawDiff + pitchDiff;
+      
+      if (dist < minDiff) {
+        minDiff = dist;
+        closestTarget = target;
+      }
 
       let aligned = false;
       if (Math.abs(target.pitch) >= 80) {
@@ -160,15 +166,20 @@ export default function ScanPage() {
       }
     })
 
+    // Update Matterport Guide Arrow
+    if (closestTarget && !targetInCrosshair) {
+      const yawDiff = getSignedDiff(closestTarget.yaw, currentYaw);
+      const pitchDiff = closestTarget.pitch - currentPitch;
+      const angleRad = Math.atan2(yawDiff, pitchDiff);
+      setArrowAngle(angleRad * (180 / Math.PI));
+    } else {
+      setArrowAngle(null);
+    }
+
     SHOTS.forEach(target => {
       const dotEl = document.getElementById(`dot-wrapper-${target.id}`)
       if (!dotEl) return
-      
-      if (targetInCrosshair && targetInCrosshair.id === target.id) {
-        dotEl.style.opacity = '0'
-      } else {
-        dotEl.style.opacity = '1'
-      }
+      dotEl.style.opacity = (targetInCrosshair && targetInCrosshair.id === target.id) ? '0' : '1'
     })
 
     if (targetInCrosshair && isPortrait) {
@@ -177,7 +188,6 @@ export default function ScanPage() {
       } else {
         const elapsed = Date.now() - hoverStartRef.current
         const progress = Math.min(1, elapsed / 1000) 
-        
         updateCrosshairUI(true, progress)
         
         if (progress >= 1 && !isProcessingRef.current) {
@@ -190,7 +200,6 @@ export default function ScanPage() {
       hoverStartRef.current = null
       updateCrosshairUI(false, 0)
     }
-
   }, [showCaptureUI, paintedImages])
 
   useEffect(() => {
@@ -333,10 +342,9 @@ export default function ScanPage() {
   return (
     <div style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', background: '#000', overflow: 'hidden', margin: 0, padding: 0, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
       <Head>
-        <title>ProView360 - True AR Scan</title>
+        <title>ProView360 - Matterport AR</title>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
-        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
       </Head>
       
       <canvas ref={canvasRef} style={{ display: 'none' }} />
@@ -345,7 +353,7 @@ export default function ScanPage() {
         <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)', color: '#fff', zIndex: 100, overflowY: 'auto' }}>
           <div style={{ width: 72, height: 72, borderRadius: 18, background: 'linear-gradient(135deg, #00d2ff, #3a7bd5)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, marginBottom: 20, boxShadow: '0 8px 32px rgba(0,210,255,0.3)' }}>AR</div>
           <h1 style={{ fontSize: 26, margin: '0 0 6px', fontWeight: 700 }}>ProView360 AR</h1>
-          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>Matterport Engine V10</p>
+          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>Matterport UI Engine</p>
           
           <div style={{ width: '100%', maxWidth: 340 }}>
             <label style={{ fontSize: 12, color: '#8b949e', display: 'block', marginBottom: 6, fontWeight: 500 }}>Room Name</label>
@@ -361,8 +369,11 @@ export default function ScanPage() {
       {showCaptureUI && (
         <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
            
-           {/* LAYER 1: Painted Images (Perfectly Sized, Brightly Visible in Pure Black Void) */}
-           <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 1, background: '#000' }}>
+           {/* LAYER 0: The Black Polygon Void */}
+           {/* (The root container is #000, creating the uncaptured black space) */}
+
+           {/* LAYER 1: Painted Images (Stamping the sphere from the inside) */}
+           <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 1, overflow: 'hidden' }}>
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
                 {paintedImages.map(img => (
                   <div key={`paint-${img.id}`} style={{
@@ -370,45 +381,65 @@ export default function ScanPage() {
                     transform: `rotateY(${img.yaw}deg) rotateX(${-img.pitch}deg) translateZ(${Z_DIST}px)`
                   }}>
                      <img src={img.url} style={{
-                        width: hud.pW, height: hud.pH, 
+                        width: PAINT_WIDTH, height: PAINT_HEIGHT, 
                         transform: 'translate(-50%, -50%)',
-                        objectFit: 'cover', opacity: 1.0
+                        objectFit: 'fill', opacity: 1.0 // Fully visible in the black void!
                      }} />
                   </div>
                 ))}
               </div>
            </div>
 
-           {/* LAYER 2: Live Video Window (Dynamic Matterport Viewport) */}
+           {/* LAYER 2: Matterport Viewfinder Window */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
               <div style={{ 
-                 width: hud.vfW, height: hud.vfH, 
-                 border: '2px solid rgba(255,255,255,0.7)', 
-                 borderRadius: '16px',
-                 position: 'relative', overflow: 'hidden',
-                 background: '#000'
-                 // NO MORE BOX SHADOW. The void remains pure black, and images are fully visible!
+                 width: 300, height: 400, 
+                 border: '2px solid rgba(255,255,255,0.9)', 
+                 position: 'relative', overflow: 'hidden' // Crops the live video to the window
               }}>
-                 <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                  
+                 {/* Live Camera Feed (Scaled perfectly to match 3D FOV) */}
+                 <video ref={videoRef} autoPlay playsInline muted style={{ 
+                     position: 'absolute',
+                     top: '50%', left: '50%',
+                     width: VIDEO_SCREEN_W, height: VIDEO_SCREEN_H, 
+                     transform: 'translate(-50%, -50%)',
+                     objectFit: 'fill', zIndex: -1 
+                 }} />
+                 
+                 {/* Reticle inside the viewfinder */}
                  <div style={{
                     position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
                     width: 54, height: 54, borderRadius: '50%', border: '4px solid #fff',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: 'transparent', opacity: 0.8
+                    background: 'transparent'
                  }}>
-                    <div id="reticle-fill" style={{
-                       width: '100%', height: '100%', borderRadius: '50%',
-                       background: 'transparent'
-                    }} />
+                    <div id="reticle-fill" style={{ width: '100%', height: '100%', borderRadius: '50%' }} />
                  </div>
                  
+                 {/* The Matterport Guide Arrow */}
+                 {arrowAngle !== null && !isProcessingRef.current && (
+                    <div style={{
+                       position: 'absolute', top: '50%', left: '50%',
+                       width: 90, height: 90,
+                       transform: `translate(-50%, -50%) rotate(${arrowAngle}deg)`,
+                       display: 'flex', alignItems: 'flex-start', justifyContent: 'center'
+                    }}>
+                       <div style={{
+                          width: 0, height: 0,
+                          borderLeft: '10px solid transparent',
+                          borderRight: '10px solid transparent',
+                          borderBottom: '14px solid rgba(255,255,255,0.95)'
+                       }} />
+                    </div>
+                 )}
+
                  {flash && <div style={{ position: 'absolute', inset: 0, background: '#fff', zIndex: 50 }} />}
               </div>
            </div>
 
-           {/* LAYER 3: 3D Tracking Dots */}
-           <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 3, pointerEvents: 'none' }}>
+           {/* LAYER 3: 3D Tracking Dots (Visible Everywhere) */}
+           <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 3, pointerEvents: 'none', overflow: 'hidden' }}>
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
                 {SHOTS.map(s => {
                   if (paintedImages.find(p => p.id === s.id)) return null;
@@ -420,7 +451,7 @@ export default function ScanPage() {
                     }}>
                        <div style={{
                          width: 44, height: 44, borderRadius: '50%', background: '#00D859',
-                         transform: 'translate(-50%, -50%)'
+                         transform: 'translate(-50%, -50%)', opacity: 0.85
                        }} />
                     </div>
                   )
@@ -428,42 +459,42 @@ export default function ScanPage() {
               </div>
            </div>
 
-           {/* LAYER 4: UI Controls */}
+           {/* LAYER 4: Matterport UI Overlays */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
-              <div style={{ position: 'absolute', top: 32, left: 24, pointerEvents: 'auto' }}>
+              
+              {/* Undo Button */}
+              <div style={{ position: 'absolute', top: 44, left: 24, pointerEvents: 'auto' }}>
                  <button onClick={undoLast} disabled={paintedImages.length === 0} style={{
-                    width: 48, height: 48, borderRadius: '50%', background: '#fff', border: 'none',
+                    width: 46, height: 46, borderRadius: '50%', background: '#fff', border: 'none',
                     display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
                     opacity: paintedImages.length > 0 ? 1 : 0.4
                  }}>
-                   <span style={{ color: '#000', fontSize: 26, fontWeight: 'bold' }}>⟲</span>
+                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7v6h6"></path><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3l-3 2.7"></path></svg>
                  </button>
               </div>
               
-              <div style={{ position: 'absolute', top: 32, right: 24, pointerEvents: 'auto' }}>
+              {/* Close Button */}
+              <div style={{ position: 'absolute', top: 44, right: 24, pointerEvents: 'auto' }}>
                  <button onClick={finishCapture} style={{
-                    width: 48, height: 48, borderRadius: '50%', background: '#ff3b30', border: 'none',
+                    width: 46, height: 46, borderRadius: '50%', background: '#ff3b30', border: 'none',
                     display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'
                  }}>
-                   <span style={{ color: '#fff', fontSize: 22, fontWeight: 'bold' }}>✕</span>
+                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                  </button>
               </div>
               
-              <div style={{ position: 'absolute', top: 100, left: 0, right: 0, textAlign: 'center', opacity: showTiltWarning ? 1 : 0, transition: 'opacity 0.2s' }}>
+              <div style={{ position: 'absolute', top: 110, left: 0, right: 0, textAlign: 'center', opacity: showTiltWarning ? 1 : 0, transition: 'opacity 0.2s' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: '#ff3b30', color: '#fff', padding: '12px 24px', borderRadius: 30, fontWeight: 'bold', fontSize: 17, boxShadow: '0 4px 12px rgba(255,0,0,0.4)' }}>
                   ⤹ Keep the phone in portrait ⤸
                 </span>
               </div>
               
-              <div style={{ position: 'absolute', bottom: 110, left: 0, right: 0, textAlign: 'center', color: '#fff', fontSize: 17, fontWeight: 500 }}>
-                 Align the live video with the stamped photos
-              </div>
-              
-              <div style={{ position: 'absolute', bottom: 44, left: '8%', right: '8%', display: 'flex', alignItems: 'center', gap: 16 }}>
-                 <div style={{ flex: 1, height: 8, background: 'rgba(255,255,255,0.2)', borderRadius: 4, overflow: 'hidden' }}>
+              {/* Matterport Progress Bar */}
+              <div style={{ position: 'absolute', bottom: 36, left: 24, right: 24, display: 'flex', alignItems: 'center', gap: 12 }}>
+                 <div style={{ flex: 1, height: 10, background: '#fff', borderRadius: 5, overflow: 'hidden', display: 'flex' }}>
                     <div style={{ width: `${(paintedImages.length / totalNeeded) * 100}%`, height: '100%', background: '#00D859', transition: 'width 0.3s ease' }} />
                  </div>
-                 <div style={{ color: '#fff', fontSize: 15, fontWeight: '600', whiteSpace: 'nowrap' }}>
+                 <div style={{ color: '#fff', fontSize: 16, fontWeight: '600', whiteSpace: 'nowrap' }}>
                     {paintedImages.length} of {totalNeeded}
                  </div>
               </div>
@@ -476,16 +507,6 @@ export default function ScanPage() {
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#4CD964', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, marginBottom: 16, color: '#fff' }}>✓</div>
           <h2 style={{ fontSize: 22, margin: '0 0 6px', fontWeight: 700 }}>Capture Complete!</h2>
           <p style={{ fontSize: 13, color: '#8b949e', margin: '0 0 20px', textAlign: 'center' }}>{paintedImages.length} shots captured<br/>{roomName} — {positionLabel}</p>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, maxWidth: 300, width: '100%', marginBottom: 20 }}>
-            {paintedImages.slice(0, 9).map((t, i) => (
-              <div key={t.id} style={{ aspectRatio: 1, borderRadius: 8, overflow: 'hidden', border: '1px solid #30363d' }}>
-                <img src={t.url} alt={`Shot`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
-              </div>
-            ))}
-            {paintedImages.length > 9 && (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: '#8b949e' }}>+{paintedImages.length - 9} more</div>
-            )}
-          </div>
           <div style={{ width: '100%', maxWidth: 300, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <button onClick={downloadZip} style={{ width: '100%', padding: 14, borderRadius: 14, border: 'none', background: '#00d2ff', color: '#000', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>⬇ Download ZIP</button>
             <button onClick={nextPosition} style={{ width: '100%', padding: 12, borderRadius: 14, border: '1px solid #00d2ff', background: 'transparent', color: '#00d2ff', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>+ Next Position</button>

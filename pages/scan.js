@@ -3,13 +3,12 @@ import Head from 'next/head'
 import JSZip from 'jszip'
 
 // MATHEMATICALLY PERFECT AR HUD SCALING
-// The 3D images are scaled to perfectly match the Live Video FOV inside the Viewfinder!
 const PERSPECTIVE = 600;
 const Z_DIST = -600;
 const VIDEO_SCREEN_W = 625;
-const VIDEO_SCREEN_H = VIDEO_SCREEN_W * (16 / 9); // 1111px
-const PAINT_WIDTH = VIDEO_SCREEN_W * 2;           // 1250px
-const PAINT_HEIGHT = VIDEO_SCREEN_H * 2;          // 2222px
+const VIDEO_SCREEN_H = VIDEO_SCREEN_W * (16 / 9);
+const PAINT_WIDTH = VIDEO_SCREEN_W * 2;
+const PAINT_HEIGHT = VIDEO_SCREEN_H * 2;
 
 export default function ScanPage() {
   const [screen, setScreen] = useState('start')
@@ -37,6 +36,7 @@ export default function ScanPage() {
   const hoverStartRef = useRef(null)
   const rafRef = useRef(null)
 
+  // STRICT MATTERPORT SEQUENCE
   const SHOTS = [
     { id: 'h1', label: 'FRONT',       yaw: 0,   pitch: 0 },
     { id: 'h2', label: 'FRONT-RIGHT', yaw: 45,  pitch: 0 },
@@ -139,20 +139,21 @@ export default function ScanPage() {
     setCamRot({ pitch: currentPitch, yaw: currentYaw })
     
     let targetInCrosshair = null
-    let closestTarget = null;
-    let minDiff = Infinity;
+    let nextTarget = null;
+
+    // STRICT SEQUENCE: Find the very first dot in the array that hasn't been captured yet
+    for (let i = 0; i < SHOTS.length; i++) {
+      if (!paintedImages.find(p => p.id === SHOTS[i].id)) {
+        nextTarget = SHOTS[i];
+        break;
+      }
+    }
 
     SHOTS.forEach(target => {
       if (paintedImages.find(p => p.id === target.id)) return
       
       const yawDiff = Math.abs(getSignedDiff(target.yaw, currentYaw))
       const pitchDiff = Math.abs(target.pitch - currentPitch)
-      const dist = yawDiff + pitchDiff;
-      
-      if (dist < minDiff) {
-        minDiff = dist;
-        closestTarget = target;
-      }
 
       let aligned = false;
       if (Math.abs(target.pitch) >= 80) {
@@ -166,10 +167,10 @@ export default function ScanPage() {
       }
     })
 
-    // Update Matterport Guide Arrow
-    if (closestTarget && !targetInCrosshair) {
-      const yawDiff = getSignedDiff(closestTarget.yaw, currentYaw);
-      const pitchDiff = closestTarget.pitch - currentPitch;
+    // Update Matterport Guide Arrow to point STRICTLY at the sequence target
+    if (nextTarget && (!targetInCrosshair || targetInCrosshair.id !== nextTarget.id)) {
+      const yawDiff = getSignedDiff(nextTarget.yaw, currentYaw);
+      const pitchDiff = nextTarget.pitch - currentPitch;
       const angleRad = Math.atan2(yawDiff, pitchDiff);
       setArrowAngle(angleRad * (180 / Math.PI));
     } else {
@@ -370,9 +371,8 @@ export default function ScanPage() {
         <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
            
            {/* LAYER 0: The Black Polygon Void */}
-           {/* (The root container is #000, creating the uncaptured black space) */}
 
-           {/* LAYER 1: Painted Images (Stamping the sphere from the inside) */}
+           {/* LAYER 1: Painted Images */}
            <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 1, overflow: 'hidden' }}>
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
                 {paintedImages.map(img => (
@@ -383,7 +383,7 @@ export default function ScanPage() {
                      <img src={img.url} style={{
                         width: PAINT_WIDTH, height: PAINT_HEIGHT, 
                         transform: 'translate(-50%, -50%)',
-                        objectFit: 'fill', opacity: 1.0 // Fully visible in the black void!
+                        objectFit: 'fill', opacity: 1.0
                      }} />
                   </div>
                 ))}
@@ -395,10 +395,9 @@ export default function ScanPage() {
               <div style={{ 
                  width: 300, height: 400, 
                  border: '2px solid rgba(255,255,255,0.9)', 
-                 position: 'relative', overflow: 'hidden' // Crops the live video to the window
+                 position: 'relative', overflow: 'hidden' 
               }}>
                  
-                 {/* Live Camera Feed (Scaled perfectly to match 3D FOV) */}
                  <video ref={videoRef} autoPlay playsInline muted style={{ 
                      position: 'absolute',
                      top: '50%', left: '50%',
@@ -407,7 +406,6 @@ export default function ScanPage() {
                      objectFit: 'fill', zIndex: -1 
                  }} />
                  
-                 {/* Reticle inside the viewfinder */}
                  <div style={{
                     position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
                     width: 54, height: 54, borderRadius: '50%', border: '4px solid #fff',
@@ -417,7 +415,7 @@ export default function ScanPage() {
                     <div id="reticle-fill" style={{ width: '100%', height: '100%', borderRadius: '50%' }} />
                  </div>
                  
-                 {/* The Matterport Guide Arrow */}
+                 {/* The Matterport Guide Arrow (STRICT SEQUENCE) */}
                  {arrowAngle !== null && !isProcessingRef.current && (
                     <div style={{
                        position: 'absolute', top: '50%', left: '50%',
@@ -462,7 +460,6 @@ export default function ScanPage() {
            {/* LAYER 4: Matterport UI Overlays */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
               
-              {/* Undo Button */}
               <div style={{ position: 'absolute', top: 44, left: 24, pointerEvents: 'auto' }}>
                  <button onClick={undoLast} disabled={paintedImages.length === 0} style={{
                     width: 46, height: 46, borderRadius: '50%', background: '#fff', border: 'none',
@@ -473,7 +470,6 @@ export default function ScanPage() {
                  </button>
               </div>
               
-              {/* Close Button */}
               <div style={{ position: 'absolute', top: 44, right: 24, pointerEvents: 'auto' }}>
                  <button onClick={finishCapture} style={{
                     width: 46, height: 46, borderRadius: '50%', background: '#ff3b30', border: 'none',
@@ -489,7 +485,6 @@ export default function ScanPage() {
                 </span>
               </div>
               
-              {/* Matterport Progress Bar */}
               <div style={{ position: 'absolute', bottom: 36, left: 24, right: 24, display: 'flex', alignItems: 'center', gap: 12 }}>
                  <div style={{ flex: 1, height: 10, background: '#fff', borderRadius: 5, overflow: 'hidden', display: 'flex' }}>
                     <div style={{ width: `${(paintedImages.length / totalNeeded) * 100}%`, height: '100%', background: '#00D859', transition: 'width 0.3s ease' }} />

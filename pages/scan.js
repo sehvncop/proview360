@@ -20,7 +20,6 @@ export default function ScanPage() {
   const [camRot, setCamRot] = useState({ pitch: 0, yaw: 0 })
   const [arrowAngle, setArrowAngle] = useState(null)
 
-  // HYBRID STATE MACHINE: 'dots' -> 'sweep_ready' -> 'sweep_active'
   const [capturePhase, setCapturePhase] = useState('dots')
   const [sweepProgress, setSweepProgress] = useState(0)
   const [sweepSpeedWarning, setSweepSpeedWarning] = useState(false)
@@ -36,7 +35,6 @@ export default function ScanPage() {
   const hoverStartRef = useRef(null)
   const rafRef = useRef(null)
 
-  // VIDEO SWEEP REFS
   const isSweepingRef = useRef(false)
   const signedAccumulatedYawRef = useRef(0)
   const lastSweepYawRef = useRef(null)
@@ -47,7 +45,6 @@ export default function ScanPage() {
   const sweepVideoBlobRef = useRef(null)
   const sweepExtRef = useRef('mp4')
 
-  // REDUCED SHOTS (CEILING AND FLOOR ONLY)
   const SHOTS = [
     { id: 'top',    label: 'CEILING', yaw: 0,   pitch: 90 },
     { id: 'bottom', label: 'FLOOR',   yaw: 0,   pitch: -90 }
@@ -131,8 +128,7 @@ export default function ScanPage() {
     setShowTiltWarning(!isPortrait)
     setCamRot({ pitch: currentPitch, yaw: currentYaw })
 
-    // VIDEO SWEEP LOGIC
-    if (isSweepingRef.current) {
+    if (isSweepingRef.current && recordingStartTimeRef.current !== null) {
        const now = Date.now()
        const timeSinceStart = (now - recordingStartTimeRef.current) / 1000
        
@@ -154,7 +150,7 @@ export default function ScanPage() {
            if (dt > 0) {
              let rawDelta = getSignedDiff(currentYaw, past.yaw)
              let speed = Math.abs(rawDelta) / dt 
-             setSweepSpeedWarning(speed > 45) // Warning if rotating faster than 45 degrees per second
+             setSweepSpeedWarning(speed > 45) 
            }
          }
 
@@ -162,10 +158,9 @@ export default function ScanPage() {
            stopSweep()
          }
        }
-       return // Skip dot rendering during sweep
+       return 
     }
 
-    // DOT LOGIC
     let targetInCrosshair = null
     let nextTarget = null;
 
@@ -323,8 +318,8 @@ export default function ScanPage() {
     signedAccumulatedYawRef.current = 0;
     lastSweepYawRef.current = null;
     telemetryRef.current = [];
+    recordingStartTimeRef.current = null; // Do NOT start logging yet!
     recordedChunksRef.current = [];
-    recordingStartTimeRef.current = Date.now();
     setSweepProgress(0);
     setSweepSpeedWarning(false);
     setCapturePhase('sweep_active');
@@ -335,6 +330,13 @@ export default function ScanPage() {
       sweepExtRef.current = mimeType.includes('mp4') ? 'mp4' : 'webm';
       
       const recorder = new MediaRecorder(streamRef.current, { mimeType, videoBitsPerSecond: 10000000 });
+      
+      // ANTI-BLUR SYNC FIX: Only begin logging telemetry EXACTLY when the video hardware actually kicks on!
+      recorder.onstart = () => {
+        recordingStartTimeRef.current = Date.now();
+        telemetryRef.current = []; 
+      };
+      
       recorder.ondataavailable = e => { if (e.data.size > 0) recordedChunksRef.current.push(e.data) }
       recorder.onstop = () => finalizeSweep()
       recorder.start(100); 
@@ -533,7 +535,6 @@ export default function ScanPage() {
 
                  {capturePhase === 'sweep_active' && (
                     <div style={{ position: 'absolute', top: '50%', left: 0, right: 0, height: 2, background: 'rgba(255,255,255,0.3)', pointerEvents: 'none' }}>
-                       {/* Horizon Guide Line */}
                        <div style={{ position: 'absolute', top: -10, left: '50%', transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.8)', fontSize: 12, fontWeight: 'bold' }}>Keep Level</div>
                     </div>
                  )}

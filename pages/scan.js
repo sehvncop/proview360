@@ -128,7 +128,9 @@ export default function ScanPage() {
     }
 
     const currentYaw = (initialYawRef.current - o.mathYaw + 360) % 360
-    const currentPitch = o.mathPitch
+    
+    // FIX 1: MathPitch is negative when looking up. We must invert it so UP = +90, DOWN = -90!
+    const currentPitch = -o.mathPitch
     
     let isPortrait = true;
     if (Math.abs(currentPitch) < 60) {
@@ -141,7 +143,6 @@ export default function ScanPage() {
     let targetInCrosshair = null
     let nextTarget = null;
 
-    // STRICT SEQUENCE: Find the very first dot in the array that hasn't been captured yet
     for (let i = 0; i < SHOTS.length; i++) {
       if (!paintedImages.find(p => p.id === SHOTS[i].id)) {
         nextTarget = SHOTS[i];
@@ -167,7 +168,6 @@ export default function ScanPage() {
       }
     })
 
-    // Update Matterport Guide Arrow to point STRICTLY at the sequence target
     if (nextTarget && (!targetInCrosshair || targetInCrosshair.id !== nextTarget.id)) {
       const yawDiff = getSignedDiff(nextTarget.yaw, currentYaw);
       const pitchDiff = nextTarget.pitch - currentPitch;
@@ -370,15 +370,17 @@ export default function ScanPage() {
       {showCaptureUI && (
         <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
            
-           {/* LAYER 0: The Black Polygon Void */}
-
            {/* LAYER 1: Painted Images */}
            <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 1, overflow: 'hidden' }}>
-              <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
+              
+              {/* FIX 2: Mathematically perfect CAMERA container transform. Positive rotation X/Y. */}
+              <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${-camRot.pitch}deg) rotateY(${camRot.yaw}deg)` }}>
+                
                 {paintedImages.map(img => (
                   <div key={`paint-${img.id}`} style={{
                     position: 'absolute', transformStyle: 'preserve-3d',
-                    transform: `rotateY(${img.yaw}deg) rotateX(${-img.pitch}deg) translateZ(${Z_DIST}px)`
+                    /* FIX 3: Mathematically perfect ITEM transform. Negative Yaw so RIGHT goes to RIGHT! */
+                    transform: `rotateY(${-img.yaw}deg) rotateX(${img.pitch}deg) translateZ(${Z_DIST}px)`
                   }}>
                      <img src={img.url} style={{
                         width: PAINT_WIDTH, height: PAINT_HEIGHT, 
@@ -415,7 +417,6 @@ export default function ScanPage() {
                     <div id="reticle-fill" style={{ width: '100%', height: '100%', borderRadius: '50%' }} />
                  </div>
                  
-                 {/* The Matterport Guide Arrow (STRICT SEQUENCE) */}
                  {arrowAngle !== null && !isProcessingRef.current && (
                     <div style={{
                        position: 'absolute', top: '50%', left: '50%',
@@ -436,15 +437,16 @@ export default function ScanPage() {
               </div>
            </div>
 
-           {/* LAYER 3: 3D Tracking Dots (Visible Everywhere) */}
+           {/* LAYER 3: 3D Tracking Dots */}
            <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 3, pointerEvents: 'none', overflow: 'hidden' }}>
-              <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${camRot.pitch}deg) rotateY(${-camRot.yaw}deg)` }}>
+              
+              <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${-camRot.pitch}deg) rotateY(${camRot.yaw}deg)` }}>
                 {SHOTS.map(s => {
                   if (paintedImages.find(p => p.id === s.id)) return null;
                   return (
                     <div key={`dot-${s.id}`} id={`dot-wrapper-${s.id}`} style={{
                       position: 'absolute', transformStyle: 'preserve-3d',
-                      transform: `rotateY(${s.yaw}deg) rotateX(${-s.pitch}deg) translateZ(${Z_DIST}px)`,
+                      transform: `rotateY(${-s.yaw}deg) rotateX(${s.pitch}deg) translateZ(${Z_DIST}px)`,
                       transition: 'opacity 0.2s'
                     }}>
                        <div style={{
@@ -457,9 +459,8 @@ export default function ScanPage() {
               </div>
            </div>
 
-           {/* LAYER 4: Matterport UI Overlays */}
+           {/* LAYER 4: UI Overlays */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
-              
               <div style={{ position: 'absolute', top: 44, left: 24, pointerEvents: 'auto' }}>
                  <button onClick={undoLast} disabled={paintedImages.length === 0} style={{
                     width: 46, height: 46, borderRadius: '50%', background: '#fff', border: 'none',
@@ -499,7 +500,7 @@ export default function ScanPage() {
 
       {screen === 'review' && (
         <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)', color: '#fff', zIndex: 100, overflowY: 'auto' }}>
-          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#4CD964', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, marginBottom: 16, color: '#fff' }}>✓</div>
+          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#4CD964', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, margin: '0 0 16px', color: '#fff' }}>✓</div>
           <h2 style={{ fontSize: 22, margin: '0 0 6px', fontWeight: 700 }}>Capture Complete!</h2>
           <p style={{ fontSize: 13, color: '#8b949e', margin: '0 0 20px', textAlign: 'center' }}>{paintedImages.length} shots captured<br/>{roomName} — {positionLabel}</p>
           <div style={{ width: '100%', maxWidth: 300, display: 'flex', flexDirection: 'column', gap: 10 }}>

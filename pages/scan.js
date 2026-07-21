@@ -20,6 +20,11 @@ export default function ScanPage() {
   const [camRot, setCamRot] = useState({ pitch: 0, yaw: 0 })
   const [arrowAngle, setArrowAngle] = useState(null)
 
+  // HYBRID STATE MACHINE: 'dots' -> 'sweep_ready' -> 'sweep_active'
+  const [capturePhase, setCapturePhase] = useState('dots')
+  const [sweepProgress, setSweepProgress] = useState(0)
+  const [sweepSpeedWarning, setSweepSpeedWarning] = useState(false)
+
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
   const streamRef = useRef(null)
@@ -31,28 +36,22 @@ export default function ScanPage() {
   const hoverStartRef = useRef(null)
   const rafRef = useRef(null)
 
-  // STRICT MATTERPORT SEQUENCE
+  // VIDEO SWEEP REFS
+  const isSweepingRef = useRef(false)
+  const signedAccumulatedYawRef = useRef(0)
+  const lastSweepYawRef = useRef(null)
+  const telemetryRef = useRef([])
+  const mediaRecorderRef = useRef(null)
+  const recordedChunksRef = useRef([])
+  const recordingStartTimeRef = useRef(null)
+  const sweepVideoBlobRef = useRef(null)
+  const sweepExtRef = useRef('mp4')
+
+  // REDUCED SHOTS (CEILING AND FLOOR ONLY)
   const SHOTS = [
-    { id: 'h1', label: 'FRONT',       yaw: 0,   pitch: 0 },
-    { id: 'h2', label: 'FRONT-RIGHT', yaw: 45,  pitch: 0 },
-    { id: 'h3', label: 'RIGHT',       yaw: 90,  pitch: 0 },
-    { id: 'h4', label: 'BACK-RIGHT',  yaw: 135, pitch: 0 },
-    { id: 'h5', label: 'BACK',        yaw: 180, pitch: 0 },
-    { id: 'h6', label: 'BACK-LEFT',   yaw: 225, pitch: 0 },
-    { id: 'h7', label: 'LEFT',        yaw: 270, pitch: 0 },
-    { id: 'h8', label: 'FRONT-LEFT',  yaw: 315, pitch: 0 },
-    { id: 'u1', label: 'UP-FRONT',    yaw: 0,   pitch: 45 },
-    { id: 'u2', label: 'UP-RIGHT',    yaw: 90,  pitch: 45 },
-    { id: 'u3', label: 'UP-BACK',     yaw: 180, pitch: 45 },
-    { id: 'u4', label: 'UP-LEFT',     yaw: 270, pitch: 45 },
-    { id: 'd1', label: 'DOWN-FRONT',  yaw: 0,   pitch: -45 },
-    { id: 'd2', label: 'DOWN-RIGHT',  yaw: 90,  pitch: -45 },
-    { id: 'd3', label: 'DOWN-BACK',   yaw: 180, pitch: -45 },
-    { id: 'd4', label: 'DOWN-LEFT',   yaw: 270, pitch: -45 },
     { id: 'top',    label: 'CEILING', yaw: 0,   pitch: 90 },
     { id: 'bottom', label: 'FLOOR',   yaw: 0,   pitch: -90 }
   ]
-  const totalNeeded = SHOTS.length
   const TOLERANCE = 5 
 
   const handleOrientation = useCallback((e) => {
@@ -130,9 +129,43 @@ export default function ScanPage() {
       isPortrait = Math.abs(o.rawGamma) < 45;
     }
     setShowTiltWarning(!isPortrait)
-    
     setCamRot({ pitch: currentPitch, yaw: currentYaw })
-    
+
+    // VIDEO SWEEP LOGIC
+    if (isSweepingRef.current) {
+       const now = Date.now()
+       const timeSinceStart = (now - recordingStartTimeRef.current) / 1000
+       
+       telemetryRef.current.push({ time: timeSinceStart, yaw: currentYaw, pitch: currentPitch })
+
+       if (lastSweepYawRef.current === null) {
+         lastSweepYawRef.current = currentYaw
+       } else {
+         let delta = getSignedDiff(currentYaw, lastSweepYawRef.current)
+         signedAccumulatedYawRef.current += delta
+         lastSweepYawRef.current = currentYaw
+         
+         const progress = Math.min(1, Math.abs(signedAccumulatedYawRef.current) / 380)
+         setSweepProgress(progress)
+         
+         if (telemetryRef.current.length > 15) {
+           const past = telemetryRef.current[telemetryRef.current.length - 15]
+           const dt = timeSinceStart - past.time
+           if (dt > 0) {
+             let rawDelta = getSignedDiff(currentYaw, past.yaw)
+             let speed = Math.abs(rawDelta) / dt 
+             setSweepSpeedWarning(speed > 45) // Warning if rotating faster than 45 degrees per second
+           }
+         }
+
+         if (Math.abs(signedAccumulatedYawRef.current) >= 380) {
+           stopSweep()
+         }
+       }
+       return // Skip dot rendering during sweep
+    }
+
+    // DOT LOGIC
     let targetInCrosshair = null
     let nextTarget = null;
 
@@ -228,6 +261,7 @@ export default function ScanPage() {
       shotsDataRef.current = []
       setPaintedImages([])
       initialYawRef.current = null
+      setCapturePhase('dots')
 
       setScreen('capture')
       setShowCaptureUI(true)
@@ -250,10 +284,8 @@ export default function ScanPage() {
     canvas.height = video.videoHeight || 1920
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
     
-    // 1. Get the High-Res HD Blob for the Matterport ZIP
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
     
-    // 2. ASPECT-RATIO CORRECT THUMBNAIL: Shrink width to 420px, calculate height dynamically to prevent pancake distortion!
     const thumbWidth = 420;
     const thumbScale = thumbWidth / canvas.width;
     const thumbHeight = canvas.height * thumbScale;
@@ -280,14 +312,54 @@ export default function ScanPage() {
       audio.play().catch(()=>{})
     } catch(e) {}
 
-    if (newPaintedImages.length >= totalNeeded) {
-      setTimeout(() => finishCapture(), 400)
-    } else {
-      isProcessingRef.current = false
+    if (newPaintedImages.length >= SHOTS.length) {
+      setTimeout(() => setCapturePhase('sweep_ready'), 500)
+    }
+    isProcessingRef.current = false
+  }
+
+  const startSweepRecording = () => {
+    isSweepingRef.current = true;
+    signedAccumulatedYawRef.current = 0;
+    lastSweepYawRef.current = null;
+    telemetryRef.current = [];
+    recordedChunksRef.current = [];
+    recordingStartTimeRef.current = Date.now();
+    setSweepProgress(0);
+    setSweepSpeedWarning(false);
+    setCapturePhase('sweep_active');
+
+    try {
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 
+                       (MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : 'video/webm');
+      sweepExtRef.current = mimeType.includes('mp4') ? 'mp4' : 'webm';
+      
+      const recorder = new MediaRecorder(streamRef.current, { mimeType, videoBitsPerSecond: 10000000 });
+      recorder.ondataavailable = e => { if (e.data.size > 0) recordedChunksRef.current.push(e.data) }
+      recorder.onstop = () => finalizeSweep()
+      recorder.start(100); 
+      mediaRecorderRef.current = recorder;
+    } catch(e) {
+      alert("Video recording failed on this device.");
+      setCapturePhase('sweep_ready');
     }
   }
 
+  const stopSweep = () => {
+    isSweepingRef.current = false;
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop();
+    }
+  }
+
+  const finalizeSweep = () => {
+    const blob = new Blob(recordedChunksRef.current, { type: mediaRecorderRef.current.mimeType });
+    sweepVideoBlobRef.current = blob;
+    finishCapture();
+  }
+
   const undoLast = () => {
+    if (capturePhase !== 'dots' && capturePhase !== 'sweep_ready') return
     if (shotsDataRef.current.length === 0) return
     shotsDataRef.current.pop()
     setPaintedImages(prev => {
@@ -295,6 +367,7 @@ export default function ScanPage() {
        newArr.pop(); 
        return newArr;
     });
+    setCapturePhase('dots');
   }
 
   const finishCapture = () => {
@@ -309,18 +382,24 @@ export default function ScanPage() {
     const zip = new JSZip()
     const folderName = `${roomName.replace(/\s+/g, '_')}_${positionLabel.replace(/\s+/g, '_')}`
     const folder = zip.folder(folderName)
+    
     folder.file('meta.json', JSON.stringify({
       room: roomName, position: positionLabel, capturedAt: new Date().toISOString(),
       shotCount: shotsDataRef.current.length,
       shots: shotsDataRef.current.map((s, i) => ({
         filename: `shot_${String(i + 1).padStart(3, '0')}.jpg`,
         yaw: s.yaw, pitch: s.pitch, label: s.label, timestamp: s.timestamp
-      }))
+      })),
+      hasSweep: true,
+      sweepFile: `sweep.${sweepExtRef.current}`,
+      telemetryFile: `telemetry.json`
     }, null, 2))
     
     folder.file('metafile.json', JSON.stringify({ platform: 'web', create_date: new Date().toISOString(), app_version: '2.1.0' }, null, 2))
     
     shotsDataRef.current.forEach((shot, i) => folder.file(`shot_${String(i + 1).padStart(3, '0')}.jpg`, shot.blob))
+    folder.file(`sweep.${sweepExtRef.current}`, sweepVideoBlobRef.current)
+    folder.file(`telemetry.json`, JSON.stringify(telemetryRef.current))
     
     const content = await zip.generateAsync({ type: 'blob' })
     const url = URL.createObjectURL(content)
@@ -334,6 +413,7 @@ export default function ScanPage() {
     setScreen('start')
     setPaintedImages([])
     shotsDataRef.current = []
+    sweepVideoBlobRef.current = null
   }
 
   useEffect(() => {
@@ -349,7 +429,6 @@ export default function ScanPage() {
       <Head>
         <title>ProView360 - Matterport AR</title>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-        <meta name="apple-mobile-web-app-capable" content="yes" />
       </Head>
       
       <canvas ref={canvasRef} style={{ display: 'none' }} />
@@ -358,7 +437,7 @@ export default function ScanPage() {
         <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)', color: '#fff', zIndex: 100, overflowY: 'auto' }}>
           <div style={{ width: 72, height: 72, borderRadius: 18, background: 'linear-gradient(135deg, #00d2ff, #3a7bd5)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, marginBottom: 20, boxShadow: '0 8px 32px rgba(0,210,255,0.3)' }}>AR</div>
           <h1 style={{ fontSize: 26, margin: '0 0 6px', fontWeight: 700 }}>ProView360 AR</h1>
-          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>Matterport UI Engine</p>
+          <p style={{ fontSize: 14, color: '#8b949e', margin: '0 0 32px', textAlign: 'center' }}>Hybrid Video Engine</p>
           
           <div style={{ width: '100%', maxWidth: 340 }}>
             <label style={{ fontSize: 12, color: '#8b949e', display: 'block', marginBottom: 6, fontWeight: 500 }}>Room Name</label>
@@ -397,8 +476,10 @@ export default function ScanPage() {
            <div style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
               <div style={{ 
                  width: 300, height: 400, 
-                 border: '2px solid rgba(255,255,255,0.9)', 
-                 position: 'relative', overflow: 'hidden' 
+                 border: `2px solid ${sweepSpeedWarning ? '#ff3b30' : 'rgba(255,255,255,0.9)'}`, 
+                 boxShadow: sweepSpeedWarning ? '0 0 30px rgba(255,59,48,0.8)' : 'none',
+                 position: 'relative', overflow: 'hidden',
+                 transition: 'all 0.2s'
               }}>
                  
                  <video ref={videoRef} autoPlay playsInline muted style={{ 
@@ -406,29 +487,54 @@ export default function ScanPage() {
                      inset: 0, width: '100%', height: '100%', 
                      objectFit: 'cover', zIndex: -1 
                  }} />
+
+                 {sweepSpeedWarning && (
+                   <div style={{ position: 'absolute', top: 20, left: 0, right: 0, textAlign: 'center', color: '#ff3b30', fontWeight: 'bold', fontSize: 24, textShadow: '0 2px 10px rgba(0,0,0,0.8)' }}>
+                     SLOW DOWN!
+                   </div>
+                 )}
                  
-                 <div style={{
-                    position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-                    width: 54, height: 54, borderRadius: '50%', border: '4px solid #fff',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: 'transparent'
-                 }}>
-                    <div id="reticle-fill" style={{ width: '100%', height: '100%', borderRadius: '50%' }} />
-                 </div>
-                 
-                 {arrowAngle !== null && !isProcessingRef.current && (
-                    <div style={{
-                       position: 'absolute', top: '50%', left: '50%',
-                       width: 90, height: 90,
-                       transform: `translate(-50%, -50%) rotate(${arrowAngle}deg)`,
-                       display: 'flex', alignItems: 'flex-start', justifyContent: 'center'
-                    }}>
-                       <div style={{
-                          width: 0, height: 0,
-                          borderLeft: '10px solid transparent',
-                          borderRight: '10px solid transparent',
-                          borderBottom: '14px solid rgba(255,255,255,0.95)'
-                       }} />
+                 {capturePhase === 'dots' && (
+                   <>
+                     <div style={{
+                        position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+                        width: 54, height: 54, borderRadius: '50%', border: '4px solid #fff',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: 'transparent'
+                     }}>
+                        <div id="reticle-fill" style={{ width: '100%', height: '100%', borderRadius: '50%' }} />
+                     </div>
+                     
+                     {arrowAngle !== null && !isProcessingRef.current && (
+                        <div style={{
+                           position: 'absolute', top: '50%', left: '50%',
+                           width: 90, height: 90,
+                           transform: `translate(-50%, -50%) rotate(${arrowAngle}deg)`,
+                           display: 'flex', alignItems: 'flex-start', justifyContent: 'center'
+                        }}>
+                           <div style={{
+                              width: 0, height: 0,
+                              borderLeft: '10px solid transparent',
+                              borderRight: '10px solid transparent',
+                              borderBottom: '14px solid rgba(255,255,255,0.95)'
+                           }} />
+                        </div>
+                     )}
+                   </>
+                 )}
+
+                 {capturePhase === 'sweep_ready' && (
+                    <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', pointerEvents: 'auto' }}>
+                       <button onClick={startSweepRecording} style={{ background: '#00D859', color: '#000', border: 'none', padding: '16px 24px', borderRadius: 30, fontSize: 18, fontWeight: 'bold', cursor: 'pointer', boxShadow: '0 4px 20px rgba(0,216,89,0.5)' }}>
+                         Start 360° Sweep
+                       </button>
+                    </div>
+                 )}
+
+                 {capturePhase === 'sweep_active' && (
+                    <div style={{ position: 'absolute', top: '50%', left: 0, right: 0, height: 2, background: 'rgba(255,255,255,0.3)', pointerEvents: 'none' }}>
+                       {/* Horizon Guide Line */}
+                       <div style={{ position: 'absolute', top: -10, left: '50%', transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.8)', fontSize: 12, fontWeight: 'bold' }}>Keep Level</div>
                     </div>
                  )}
 
@@ -436,32 +542,34 @@ export default function ScanPage() {
               </div>
            </div>
 
-           <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 3, pointerEvents: 'none', overflow: 'hidden' }}>
-              <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${-camRot.pitch}deg) rotateY(${camRot.yaw}deg)` }}>
-                {SHOTS.map(s => {
-                  if (paintedImages.find(p => p.id === s.id)) return null;
-                  return (
-                    <div key={`dot-${s.id}`} id={`dot-wrapper-${s.id}`} style={{
-                      position: 'absolute', transformStyle: 'preserve-3d',
-                      transform: `rotateY(${-s.yaw}deg) rotateX(${s.pitch}deg) translateZ(${Z_DIST}px)`,
-                      transition: 'opacity 0.2s'
-                    }}>
-                       <div style={{
-                         width: 44, height: 44, borderRadius: '50%', background: '#00D859',
-                         transform: 'translate(-50%, -50%)', opacity: 0.85
-                       }} />
-                    </div>
-                  )
-                })}
-              </div>
-           </div>
+           {capturePhase === 'dots' && (
+             <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 3, pointerEvents: 'none', overflow: 'hidden' }}>
+                <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${-camRot.pitch}deg) rotateY(${camRot.yaw}deg)` }}>
+                  {SHOTS.map(s => {
+                    if (paintedImages.find(p => p.id === s.id)) return null;
+                    return (
+                      <div key={`dot-${s.id}`} id={`dot-wrapper-${s.id}`} style={{
+                        position: 'absolute', transformStyle: 'preserve-3d',
+                        transform: `rotateY(${-s.yaw}deg) rotateX(${s.pitch}deg) translateZ(${Z_DIST}px)`,
+                        transition: 'opacity 0.2s'
+                      }}>
+                         <div style={{
+                           width: 44, height: 44, borderRadius: '50%', background: '#00D859',
+                           transform: 'translate(-50%, -50%)', opacity: 0.85
+                         }} />
+                      </div>
+                    )
+                  })}
+                </div>
+             </div>
+           )}
 
            <div style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
               <div style={{ position: 'absolute', top: 44, left: 24, pointerEvents: 'auto' }}>
-                 <button onClick={undoLast} disabled={paintedImages.length === 0} style={{
+                 <button onClick={undoLast} disabled={paintedImages.length === 0 || capturePhase === 'sweep_active'} style={{
                     width: 46, height: 46, borderRadius: '50%', background: '#fff', border: 'none',
                     display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
-                    opacity: paintedImages.length > 0 ? 1 : 0.4
+                    opacity: (paintedImages.length > 0 && capturePhase !== 'sweep_active') ? 1 : 0.4
                  }}>
                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7v6h6"></path><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3l-3 2.7"></path></svg>
                  </button>
@@ -484,10 +592,15 @@ export default function ScanPage() {
               
               <div style={{ position: 'absolute', bottom: 36, left: 24, right: 24, display: 'flex', alignItems: 'center', gap: 12 }}>
                  <div style={{ flex: 1, height: 10, background: '#fff', borderRadius: 5, overflow: 'hidden', display: 'flex' }}>
-                    <div style={{ width: `${(paintedImages.length / totalNeeded) * 100}%`, height: '100%', background: '#00D859', transition: 'width 0.3s ease' }} />
+                    <div style={{ 
+                      width: capturePhase === 'sweep_active' ? `${sweepProgress * 100}%` : `${(paintedImages.length / SHOTS.length) * 100}%`, 
+                      height: '100%', 
+                      background: sweepSpeedWarning ? '#ff3b30' : '#00D859', 
+                      transition: 'width 0.1s linear' 
+                    }} />
                  </div>
-                 <div style={{ color: '#fff', fontSize: 16, fontWeight: '600', whiteSpace: 'nowrap' }}>
-                    {paintedImages.length} of {totalNeeded}
+                 <div style={{ color: '#fff', fontSize: 16, fontWeight: '600', whiteSpace: 'nowrap', width: 40, textAlign: 'right' }}>
+                    {capturePhase === 'sweep_active' ? `${Math.floor(sweepProgress * 100)}%` : `${paintedImages.length}/${SHOTS.length}`}
                  </div>
               </div>
            </div>
@@ -498,9 +611,12 @@ export default function ScanPage() {
         <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'linear-gradient(180deg, #0d1117 0%, #161b22 100%)', color: '#fff', zIndex: 100, overflowY: 'auto' }}>
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#4CD964', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, margin: '0 0 16px', color: '#fff' }}>✓</div>
           <h2 style={{ fontSize: 22, margin: '0 0 6px', fontWeight: 700 }}>Capture Complete!</h2>
-          <p style={{ fontSize: 13, color: '#8b949e', margin: '0 0 20px', textAlign: 'center' }}>{paintedImages.length} shots captured<br/>{roomName} — {positionLabel}</p>
+          <p style={{ fontSize: 13, color: '#8b949e', margin: '0 0 20px', textAlign: 'center' }}>
+            {sweepVideoBlobRef.current ? '360° Sweep + Ceiling/Floor' : `${paintedImages.length} shots captured`}<br/>
+            {roomName} — {positionLabel}
+          </p>
           <div style={{ width: '100%', maxWidth: 300, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <button onClick={downloadZip} style={{ width: '100%', padding: 14, borderRadius: 14, border: 'none', background: '#00d2ff', color: '#000', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>⬇ Download ZIP</button>
+            <button onClick={downloadZip} style={{ width: '100%', padding: 14, borderRadius: 14, border: 'none', background: '#00d2ff', color: '#000', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>⬇ Download Hybrid ZIP</button>
             <button onClick={nextPosition} style={{ width: '100%', padding: 12, borderRadius: 14, border: '1px solid #00d2ff', background: 'transparent', color: '#00d2ff', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>+ Next Position</button>
           </div>
         </div>

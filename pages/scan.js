@@ -128,8 +128,6 @@ export default function ScanPage() {
     }
 
     const currentYaw = (initialYawRef.current - o.mathYaw + 360) % 360
-    
-    // FIX 1: MathPitch is negative when looking up. We must invert it so UP = +90, DOWN = -90!
     const currentPitch = -o.mathPitch
     
     let isPortrait = true;
@@ -256,8 +254,16 @@ export default function ScanPage() {
     canvas.width = video.videoWidth || 1920
     canvas.height = video.videoHeight || 1080
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
+    
+    // 1. Get the High-Res HD Blob for the Matterport ZIP
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
-    const url = URL.createObjectURL(blob)
+    
+    // 2. ANTI-CRASH MEMORY FIX: Generate a lightweight 640x360 thumbnail specifically for the AR UI!
+    const thumbCanvas = document.createElement('canvas')
+    thumbCanvas.width = 640
+    thumbCanvas.height = 360
+    thumbCanvas.getContext('2d').drawImage(canvas, 0, 0, 640, 360)
+    const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.6) // Lightweight base64 string
     
     const shotData = {
       id: target.id, yaw: target.yaw, pitch: target.pitch,
@@ -266,7 +272,8 @@ export default function ScanPage() {
     
     shotsDataRef.current.push(shotData)
     
-    const newPaintedImages = [...paintedImages, { id: target.id, url, yaw: target.yaw, pitch: target.pitch }]
+    // Only pass the tiny thumbnail to the UI, saving 135MB of GPU memory!
+    const newPaintedImages = [...paintedImages, { id: target.id, url: thumbUrl, yaw: target.yaw, pitch: target.pitch }]
     setPaintedImages(newPaintedImages)
     
     try {
@@ -287,8 +294,7 @@ export default function ScanPage() {
     shotsDataRef.current.pop()
     setPaintedImages(prev => {
        const newArr = [...prev];
-       const removedImg = newArr.pop();
-       URL.revokeObjectURL(removedImg.url);
+       newArr.pop(); // We don't need revokeObjectURL anymore because we use toDataURL
        return newArr;
     });
   }
@@ -370,16 +376,11 @@ export default function ScanPage() {
       {showCaptureUI && (
         <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
            
-           {/* LAYER 1: Painted Images */}
            <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 1, overflow: 'hidden' }}>
-              
-              {/* FIX 2: Mathematically perfect CAMERA container transform. Positive rotation X/Y. */}
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${-camRot.pitch}deg) rotateY(${camRot.yaw}deg)` }}>
-                
                 {paintedImages.map(img => (
                   <div key={`paint-${img.id}`} style={{
                     position: 'absolute', transformStyle: 'preserve-3d',
-                    /* FIX 3: Mathematically perfect ITEM transform. Negative Yaw so RIGHT goes to RIGHT! */
                     transform: `rotateY(${-img.yaw}deg) rotateX(${img.pitch}deg) translateZ(${Z_DIST}px)`
                   }}>
                      <img src={img.url} style={{
@@ -392,7 +393,6 @@ export default function ScanPage() {
               </div>
            </div>
 
-           {/* LAYER 2: Matterport Viewfinder Window */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
               <div style={{ 
                  width: 300, height: 400, 
@@ -437,9 +437,7 @@ export default function ScanPage() {
               </div>
            </div>
 
-           {/* LAYER 3: 3D Tracking Dots */}
            <div style={{ position: 'absolute', inset: 0, perspective: `${PERSPECTIVE}px`, zIndex: 3, pointerEvents: 'none', overflow: 'hidden' }}>
-              
               <div style={{ position: 'absolute', top: '50%', left: '50%', transformStyle: 'preserve-3d', transform: `rotateX(${-camRot.pitch}deg) rotateY(${camRot.yaw}deg)` }}>
                 {SHOTS.map(s => {
                   if (paintedImages.find(p => p.id === s.id)) return null;
@@ -459,7 +457,6 @@ export default function ScanPage() {
               </div>
            </div>
 
-           {/* LAYER 4: UI Overlays */}
            <div style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
               <div style={{ position: 'absolute', top: 44, left: 24, pointerEvents: 'auto' }}>
                  <button onClick={undoLast} disabled={paintedImages.length === 0} style={{

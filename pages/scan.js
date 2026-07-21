@@ -2,13 +2,8 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import Head from 'next/head'
 import JSZip from 'jszip'
 
-// MATHEMATICALLY PERFECT AR HUD SCALING
 const PERSPECTIVE = 600;
 const Z_DIST = -600;
-const VIDEO_SCREEN_W = 625;
-const VIDEO_SCREEN_H = VIDEO_SCREEN_W * (16 / 9);
-const PAINT_WIDTH = VIDEO_SCREEN_W * 2;
-const PAINT_HEIGHT = VIDEO_SCREEN_H * 2;
 
 export default function ScanPage() {
   const [screen, setScreen] = useState('start')
@@ -251,19 +246,23 @@ export default function ScanPage() {
     setFlash(true)
     setTimeout(() => setFlash(false), 120)
 
-    canvas.width = video.videoWidth || 1920
-    canvas.height = video.videoHeight || 1080
+    canvas.width = video.videoWidth || 1080
+    canvas.height = video.videoHeight || 1920
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
     
     // 1. Get the High-Res HD Blob for the Matterport ZIP
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
     
-    // 2. ANTI-CRASH MEMORY FIX: Generate a lightweight 640x360 thumbnail specifically for the AR UI!
+    // 2. ASPECT-RATIO CORRECT THUMBNAIL: Shrink width to 420px, calculate height dynamically to prevent pancake distortion!
+    const thumbWidth = 420;
+    const thumbScale = thumbWidth / canvas.width;
+    const thumbHeight = canvas.height * thumbScale;
+    
     const thumbCanvas = document.createElement('canvas')
-    thumbCanvas.width = 640
-    thumbCanvas.height = 360
-    thumbCanvas.getContext('2d').drawImage(canvas, 0, 0, 640, 360)
-    const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.6) // Lightweight base64 string
+    thumbCanvas.width = thumbWidth;
+    thumbCanvas.height = thumbHeight;
+    thumbCanvas.getContext('2d').drawImage(canvas, 0, 0, thumbWidth, thumbHeight)
+    const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.6) 
     
     const shotData = {
       id: target.id, yaw: target.yaw, pitch: target.pitch,
@@ -272,7 +271,6 @@ export default function ScanPage() {
     
     shotsDataRef.current.push(shotData)
     
-    // Only pass the tiny thumbnail to the UI, saving 135MB of GPU memory!
     const newPaintedImages = [...paintedImages, { id: target.id, url: thumbUrl, yaw: target.yaw, pitch: target.pitch }]
     setPaintedImages(newPaintedImages)
     
@@ -294,7 +292,7 @@ export default function ScanPage() {
     shotsDataRef.current.pop()
     setPaintedImages(prev => {
        const newArr = [...prev];
-       newArr.pop(); // We don't need revokeObjectURL anymore because we use toDataURL
+       newArr.pop(); 
        return newArr;
     });
   }
@@ -384,9 +382,12 @@ export default function ScanPage() {
                     transform: `rotateY(${-img.yaw}deg) rotateX(${img.pitch}deg) translateZ(${Z_DIST}px)`
                   }}>
                      <img src={img.url} style={{
-                        width: PAINT_WIDTH, height: PAINT_HEIGHT, 
+                        width: 420, height: 'auto', 
                         transform: 'translate(-50%, -50%)',
-                        objectFit: 'fill', opacity: 1.0
+                        objectFit: 'contain', 
+                        opacity: 0.85, 
+                        backfaceVisibility: 'hidden',
+                        filter: 'drop-shadow(0 0 10px rgba(0,0,0,0.8))'
                      }} />
                   </div>
                 ))}
@@ -402,10 +403,8 @@ export default function ScanPage() {
                  
                  <video ref={videoRef} autoPlay playsInline muted style={{ 
                      position: 'absolute',
-                     top: '50%', left: '50%',
-                     width: VIDEO_SCREEN_W, height: VIDEO_SCREEN_H, 
-                     transform: 'translate(-50%, -50%)',
-                     objectFit: 'fill', zIndex: -1 
+                     inset: 0, width: '100%', height: '100%', 
+                     objectFit: 'cover', zIndex: -1 
                  }} />
                  
                  <div style={{
